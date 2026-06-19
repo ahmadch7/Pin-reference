@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   Search,
   Cpu,
@@ -17,7 +17,19 @@ import {
   HelpCircle,
   X,
   Usb,
-  Link2
+  Link2,
+  SlidersHorizontal,
+  Plus,
+  Trash2,
+  AlertOctagon,
+  ClipboardCheck,
+  Wifi,
+  Terminal,
+  Upload,
+  Play,
+  Send,
+  RotateCw,
+  Loader2
 } from "lucide-react";
 import { preloadedBoards } from "./data/preloadedBoards";
 import { MicrocontrollerBoard, BoardPin } from "./types";
@@ -212,6 +224,183 @@ const offlineSearches: Record<string, Omit<MicrocontrollerBoard, 'id'>> = {
   }
 };
 
+// ============================================================================
+//  PIN PLANNER  —  assign pins to jobs and flag conflicts before you wire/boot
+// ============================================================================
+
+type PinDrive = "out" | "in" | "bidir" | "analog";
+interface PlannerRole {
+  id: string;
+  label: string;
+  short: string;
+  drive: PinDrive; // does the job drive the pin (out), read it (in), both, or analog?
+  group?: string;
+}
+
+const PLANNER_ROLES: PlannerRole[] = [
+  { id: "i2c_sda", label: "I²C — SDA", short: "SDA", drive: "bidir", group: "I²C" },
+  { id: "i2c_scl", label: "I²C — SCL", short: "SCL", drive: "out", group: "I²C" },
+  { id: "spi_mosi", label: "SPI — MOSI", short: "MOSI", drive: "out", group: "SPI" },
+  { id: "spi_miso", label: "SPI — MISO", short: "MISO", drive: "in", group: "SPI" },
+  { id: "spi_sck", label: "SPI — SCK", short: "SCK", drive: "out", group: "SPI" },
+  { id: "spi_cs", label: "SPI — CS", short: "CS", drive: "out", group: "SPI" },
+  { id: "uart_tx", label: "UART — TX", short: "TX", drive: "out", group: "UART" },
+  { id: "uart_rx", label: "UART — RX", short: "RX", drive: "in", group: "UART" },
+  { id: "pwm", label: "PWM output", short: "PWM", drive: "out", group: "GPIO" },
+  { id: "dout", label: "Digital out / MOSFET gate", short: "OUT", drive: "out", group: "GPIO" },
+  { id: "din", label: "Digital in / button", short: "IN", drive: "in", group: "GPIO" },
+  { id: "adc", label: "Analog in (ADC)", short: "ADC", drive: "analog", group: "GPIO" },
+  { id: "sensor", label: "Sensor / other", short: "SENS", drive: "bidir", group: "GPIO" },
+];
+
+interface PinCaps {
+  assignable: boolean;
+  inputOnly: boolean;
+  flash: boolean;
+  strapping: boolean;
+  adc2: boolean;
+  uart0Debug: boolean;
+  canAnalog: boolean;
+}
+
+// Work out what a pin can/can't do from its metadata. Preloaded boards carry
+// rich caution text; ESP32 also gets authoritative GPIO-number rules.
+function classifyPlannerPin(pin: BoardPin, board: MicrocontrollerBoard): PinCaps {
+  const text = `${pin.name} ${pin.primary} ${(pin.features || []).join(" ")} ${pin.caution || ""}`.toLowerCase();
+  const g = parseInt(pin.gpio, 10);
+  const hasG = !isNaN(g);
+  const arch = (board.specs?.architecture || "").toLowerCase();
+  const id = (board.id || "").toLowerCase();
+  const esp32Classic =
+    id.includes("esp32-30") ||
+    (arch.includes("xtensa") && !id.includes("s3") && !arch.includes("s3"));
+  const assignable = !!pin.gpio && pin.gpio !== "N/A";
+  return {
+    assignable,
+    inputOnly:
+      /input only|input-only/.test(text) ||
+      (esp32Classic && hasG && [34, 35, 36, 39].includes(g)),
+    flash:
+      /internal (spi )?flash|flash memory line|tied to (the )?(internal )?(spi )?flash|do not (use|connect)/.test(text) ||
+      (esp32Classic && hasG && [6, 7, 8, 9, 10, 11].includes(g)),
+    strapping:
+      /strap|boot critical|boot fail|boot mode|affects? .*boot/.test(text) ||
+      (esp32Classic && hasG && [0, 2, 5, 12, 15].includes(g)),
+    adc2: /adc2/.test(text),
+    uart0Debug: /(uart0|debug|usb)/.test(text) && /\b(tx|rx|txd|rxd)\b/.test(text),
+    canAnalog: /adc|analog|dac/.test(text),
+  };
+}
+
+interface PinAssignment {
+  id: string;
+  roleId: string;
+  pinName: string;
+  label?: string;
+}
+interface PlanIssue {
+  sev: "error" | "warn";
+  text: string;
+}
+interface PlanResult {
+  perAssignment: Record<string, { severity: "ok" | "warn" | "error"; messages: PlanIssue[] }>;
+  errors: number;
+  warnings: number;
+}
+
+function assignmentLabel(a: PinAssignment): string {
+  const role = PLANNER_ROLES.find((r) => r.id === a.roleId);
+  return (a.label && a.label.trim()) || role?.label || "Assignment";
+}
+
+// The heart of the planner: turn a list of assignments into live conflicts.
+function analyzePlan(
+  assignments: PinAssignment[],
+  board: MicrocontrollerBoard,
+  wifiInUse: boolean
+): PlanResult {
+  const byPin: Record<string, PinAssignment[]> = {};
+  for (const a of assignments) {
+    if (a.pinName) (byPin[a.pinName] = byPin[a.pinName] || []).push(a);
+  }
+
+  const perAssignment: PlanResult["perAssignment"] = {};
+  let errors = 0;
+  let warnings = 0;
+
+  for (const a of assignments) {
+    const msgs: PlanIssue[] = [];
+    const role = PLANNER_ROLES.find((r) => r.id === a.roleId);
+
+    if (!a.pinName) {
+      perAssignment[a.id] = { severity: "ok", messages: [] };
+      continue;
+    }
+
+    // Double-booked: same physical pin used by more than one job.
+    if (byPin[a.pinName] && byPin[a.pinName].length > 1) {
+      const others = byPin[a.pinName]
+        .filter((x) => x.id !== a.id)
+        .map((x) => assignmentLabel(x))
+        .join(", ");
+      msgs.push({ sev: "error", text: `Double-booked — this pin is also used by ${others}.` });
+    }
+
+    const pin = board.pins.find((p) => p.name === a.pinName);
+    if (pin) {
+      const c = classifyPlannerPin(pin, board);
+      if (!c.assignable) {
+        msgs.push({ sev: "error", text: "Power / ground / reset pin — not usable as I/O." });
+      }
+      if (c.flash) {
+        msgs.push({ sev: "error", text: "Wired to the internal SPI flash (GPIO 6–11). Using it crashes/hangs the chip — never connect here." });
+      }
+      if (c.inputOnly && role && (role.drive === "out" || role.drive === "bidir")) {
+        msgs.push({ sev: "error", text: `Input-only pin — it has no output driver, so it can’t do ${role.short}.` });
+      }
+      if (role && role.drive === "analog" && !c.canAnalog) {
+        msgs.push({ sev: "warn", text: "No ADC on this pin — an analog read here won’t work." });
+      }
+      if (c.adc2 && role && role.drive === "analog" && wifiInUse) {
+        msgs.push({ sev: "warn", text: "ADC2 pin — can’t be read while Wi-Fi is active on ESP32. Use an ADC1 pin instead." });
+      }
+      if (c.strapping) {
+        msgs.push({ sev: "warn", text: "Strapping / boot pin — the wrong level at power-up can stop the board booting or force flash mode. Keep it free at boot." });
+      }
+      if (c.uart0Debug && a.roleId !== "uart_tx" && a.roleId !== "uart_rx") {
+        msgs.push({ sev: "warn", text: "This is the USB / debug serial pin — reusing it can clash with uploads and the Serial monitor." });
+      }
+    }
+
+    const severity = msgs.some((m) => m.sev === "error")
+      ? "error"
+      : msgs.some((m) => m.sev === "warn")
+      ? "warn"
+      : "ok";
+    if (severity === "error") errors++;
+    else if (severity === "warn") warnings++;
+    perAssignment[a.id] = { severity, messages: msgs };
+  }
+
+  return { perAssignment, errors, warnings };
+}
+
+// Best-effort default pin for a bus line, found from pin metadata.
+function findPinByFeature(
+  board: MicrocontrollerBoard,
+  includes: string[],
+  avoid: string[] = []
+): string {
+  const hit = board.pins.find((p) => {
+    if (!p.gpio || p.gpio === "N/A") return false;
+    const hay = `${p.name} ${(p.features || []).join(" ")} ${p.primary}`.toLowerCase();
+    const caut = (p.caution || "").toLowerCase();
+    if (avoid.some((a) => hay.includes(a) || caut.includes(a))) return false;
+    return includes.some((k) => hay.includes(k));
+  });
+  return hit ? hit.name : "";
+}
+
 export default function App() {
   const [selectedBoardId, setSelectedBoardId] = useState<string>("esp32-30pin");
   const [customBoard, setCustomBoard] = useState<MicrocontrollerBoard | null>(null);
@@ -229,6 +418,29 @@ export default function App() {
 
   // History of online searches
   const [searchHistory, setSearchHistory] = useState<string[]>(["STM32 Blue Pill", "Raspberry Pi Pico", "ATtiny85"]);
+
+  // Flash & Monitor (compile / upload / Web Serial) state
+  const [flashOpen, setFlashOpen] = useState<boolean>(false);
+  const [sketches, setSketches] = useState<{ name: string; path: string }[]>([]);
+  const [selectedSketch, setSelectedSketch] = useState<string>("");
+  const [busy, setBusy] = useState<"" | "compile" | "upload">("");
+  const [buildOutput, setBuildOutput] = useState<string>("");
+  const [buildOk, setBuildOk] = useState<boolean | null>(null);
+  const [serialConnected, setSerialConnected] = useState<boolean>(false);
+  const [serialLines, setSerialLines] = useState<string>("");
+  const [baud, setBaud] = useState<number>(115200);
+  const [serialInput, setSerialInput] = useState<string>("");
+  const serialPortRef = useRef<any>(null);
+  const serialReaderRef = useRef<any>(null);
+  const serialKeepRef = useRef<boolean>(false);
+  const consoleRef = useRef<HTMLPreElement | null>(null);
+
+  // Pin Planner state
+  const [plannerOpen, setPlannerOpen] = useState<boolean>(false);
+  const [assignments, setAssignments] = useState<PinAssignment[]>([]);
+  const [wifiInUse, setWifiInUse] = useState<boolean>(true);
+  const [planCopied, setPlanCopied] = useState<boolean>(false);
+  const planIdRef = useRef<number>(1);
 
   // Arduino IDE live sync state
   const [syncEnabled, setSyncEnabled] = useState<boolean>(true);
@@ -249,6 +461,7 @@ export default function App() {
   useEffect(() => {
     setHoveredPinName(null);
     setSelectedPinName(null);
+    setAssignments([]); // a plan is board-specific; pins differ between boards
   }, [selectedBoardId]);
 
   // Poll the backend for the board currently plugged into USB. We chain with
@@ -548,6 +761,17 @@ export default function App() {
 
   // Helper categories for pins filtering
   const getPinCategoryColor = (pin: BoardPin) => {
+    // Pin Planner overlay: when planning, assigned pins take a distinct colour
+    // (red = conflict, amber = caution, orange = assigned-OK) so the board map
+    // doubles as a live wiring diagram.
+    if (plannerOpen && planByPin[pin.name]) {
+      const sev = planByPin[pin.name];
+      if (sev === "error")
+        return { bg: "bg-red-600/30 border-2 border-red-500", text: "text-red-200", indicator: "bg-red-500", border: "border-red-500" };
+      if (sev === "warn")
+        return { bg: "bg-amber-500/25 border-2 border-amber-400", text: "text-amber-100", indicator: "bg-amber-400", border: "border-amber-400" };
+      return { bg: "bg-orange-500/30 border-2 border-orange-400", text: "text-orange-100", indicator: "bg-orange-400", border: "border-orange-400" };
+    }
     if (pin.isCaution || pin.caution && pin.caution.length > 5) {
       return {
         bg: "bg-amber-950/40 border border-amber-500/50 hover:bg-amber-900/60",
@@ -629,6 +853,191 @@ export default function App() {
   const leftPins = activeBoard.pins.slice(0, Math.ceil(activeBoard.pins.length / 2));
   const rightPins = activeBoard.pins.slice(Math.ceil(activeBoard.pins.length / 2));
 
+  // ---- Pin Planner derived data ----
+  const planResult = useMemo(
+    () => analyzePlan(assignments, activeBoard, wifiInUse),
+    [assignments, activeBoard, wifiInUse]
+  );
+
+  // pinName -> worst severity, used to colour the board map.
+  const planByPin: Record<string, "ok" | "warn" | "error"> = {};
+  const sevRank = { ok: 0, warn: 1, error: 2 } as const;
+  for (const a of assignments) {
+    if (!a.pinName) continue;
+    const sev = planResult.perAssignment[a.id]?.severity || "ok";
+    const cur = planByPin[a.pinName];
+    if (!cur || sevRank[sev] > sevRank[cur]) planByPin[a.pinName] = sev;
+  }
+
+  // Only pins that can actually be assigned a job (no power/ground/reset).
+  const assignablePins = activeBoard.pins.filter((p) => p.gpio && p.gpio !== "N/A");
+  const planIsEsp32 =
+    (activeBoard.id || "").toLowerCase().includes("esp32") ||
+    activeBoard.specs.architecture.toLowerCase().includes("xtensa");
+
+  const addAssignment = (roleId: string, pinName = "") =>
+    setAssignments((prev) => [...prev, { id: `a${planIdRef.current++}`, roleId, pinName }]);
+  const updateAssignment = (id: string, patch: Partial<PinAssignment>) =>
+    setAssignments((prev) => prev.map((a) => (a.id === id ? { ...a, ...patch } : a)));
+  const removeAssignment = (id: string) =>
+    setAssignments((prev) => prev.filter((a) => a.id !== id));
+
+  const quickAddBus = (bus: "i2c" | "spi" | "uart") => {
+    if (bus === "i2c") {
+      addAssignment("i2c_sda", findPinByFeature(activeBoard, ["sda"]));
+      addAssignment("i2c_scl", findPinByFeature(activeBoard, ["scl"]));
+    } else if (bus === "spi") {
+      addAssignment("spi_mosi", findPinByFeature(activeBoard, ["mosi"]));
+      addAssignment("spi_miso", findPinByFeature(activeBoard, ["miso"]));
+      addAssignment("spi_sck", findPinByFeature(activeBoard, ["sck", "spi_clk", "_clk"]));
+      addAssignment("spi_cs", findPinByFeature(activeBoard, ["_cs", "spi_cs", "vspi_cs", "hspi_cs", "ss"]));
+    } else {
+      addAssignment("uart_tx", findPinByFeature(activeBoard, ["txd", "uart2_tx", "tx"], ["debug", "usb", "uart0"]));
+      addAssignment("uart_rx", findPinByFeature(activeBoard, ["rxd", "uart2_rx", "rx"], ["debug", "usb", "uart0"]));
+    }
+  };
+
+  const copyPlan = () => {
+    const lines = [`# ${activeBoard.name} — Pin Plan`, "", "| Job | Pin | Notes |", "|---|---|---|"];
+    for (const a of assignments) {
+      const notes = (planResult.perAssignment[a.id]?.messages || []).map((m) => m.text).join(" ") || "OK";
+      lines.push(`| ${assignmentLabel(a)} | ${a.pinName || "—"} | ${notes} |`);
+    }
+    const text = lines.join("\n");
+    try {
+      navigator.clipboard.writeText(text);
+      setPlanCopied(true);
+      setTimeout(() => setPlanCopied(false), 1500);
+    } catch {
+      /* clipboard blocked - ignore */
+    }
+  };
+
+  // ---- Flash & Monitor ----
+  // Pull the list of recent sketches when the panel opens.
+  useEffect(() => {
+    if (!flashOpen) return;
+    fetch("/api/arduino/sketches")
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok) {
+          setSketches(d.sketches || []);
+          setSelectedSketch((prev) => prev || d.active || d.sketches?.[0]?.path || "");
+        }
+      })
+      .catch(() => {});
+  }, [flashOpen]);
+
+  // Keep the serial console scrolled to the newest line.
+  useEffect(() => {
+    if (consoleRef.current) consoleRef.current.scrollTop = consoleRef.current.scrollHeight;
+  }, [serialLines]);
+
+  const disconnectSerial = async () => {
+    serialKeepRef.current = false;
+    try {
+      await serialReaderRef.current?.cancel();
+    } catch {}
+    try {
+      await serialPortRef.current?.close();
+    } catch {}
+    serialPortRef.current = null;
+    setSerialConnected(false);
+  };
+
+  // Compile (and optionally upload) the selected sketch via the backend.
+  const doBuild = async (upload: boolean) => {
+    if (!selectedSketch) {
+      setBuildOk(false);
+      setBuildOutput("Pick a sketch first.");
+      return;
+    }
+    setBusy(upload ? "upload" : "compile");
+    setBuildOk(null);
+    setBuildOutput(upload ? "Compiling & uploading… (first build of a core can take a minute)" : "Compiling… (first build of a core can take a minute)");
+    // Free the COM port for arduino-cli if the browser holds it.
+    if (upload && serialConnected) await disconnectSerial();
+    try {
+      const body = {
+        path: selectedSketch,
+        fqbn: arduinoStatus?.board?.fqbn || undefined,
+        port: arduinoStatus?.board?.port || undefined,
+      };
+      const r = await fetch(`/api/arduino/${upload ? "upload" : "compile"}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const d = await r.json();
+      setBuildOk(!!d.success);
+      setBuildOutput(d.output || (d.success ? "Done." : "Failed."));
+    } catch (e: any) {
+      setBuildOk(false);
+      setBuildOutput("Request failed: " + (e?.message || e));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const readSerialLoop = async () => {
+    const port = serialPortRef.current;
+    if (!port?.readable) return;
+    const decoder = new TextDecoder();
+    while (serialKeepRef.current && port.readable) {
+      const reader = port.readable.getReader();
+      serialReaderRef.current = reader;
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (value) {
+            const chunk = decoder.decode(value);
+            setSerialLines((s) => (s + chunk).slice(-12000)); // cap buffer
+          }
+        }
+      } catch {
+        /* reader cancelled or device unplugged */
+      } finally {
+        try {
+          reader.releaseLock();
+        } catch {}
+      }
+    }
+  };
+
+  const connectSerial = async () => {
+    const nav = navigator as any;
+    if (!nav.serial) {
+      setSerialLines((s) => s + "\n[Web Serial isn't supported in this browser — use Chrome or Edge.]\n");
+      return;
+    }
+    try {
+      const port = await nav.serial.requestPort();
+      await port.open({ baudRate: baud });
+      serialPortRef.current = port;
+      serialKeepRef.current = true;
+      setSerialConnected(true);
+      setSerialLines((s) => s + `\n[Connected @ ${baud} baud]\n`);
+      readSerialLoop();
+    } catch (e: any) {
+      // user dismissed the chooser, or port busy (IDE monitor open / uploading)
+      setSerialLines((s) => s + `\n[Connect failed: ${e?.message || e}]\n`);
+    }
+  };
+
+  const sendSerial = async () => {
+    const port = serialPortRef.current;
+    if (!port?.writable) return;
+    try {
+      const w = port.writable.getWriter();
+      await w.write(new TextEncoder().encode(serialInput + "\n"));
+      w.releaseLock();
+      setSerialInput("");
+    } catch (e: any) {
+      setSerialLines((s) => s + `\n[Send failed: ${e?.message || e}]\n`);
+    }
+  };
+
   return (
     <div className="bg-[#0a0a0b] text-[#e5e5e0] min-h-screen flex flex-col font-sans select-none antialiased">
       {/* Top Header */}
@@ -676,6 +1085,39 @@ export default function App() {
               <Search className="absolute left-3.5 top-2.5 text-zinc-500" size={13} />
             </div>
           </form>
+
+          {/* Pin Planner toggle */}
+          <button
+            onClick={() => setPlannerOpen((v) => !v)}
+            className={`relative inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-all ${plannerOpen
+                ? "bg-orange-600 border-orange-500 text-white"
+                : "bg-[#141416] border-[#2a2a2e] text-zinc-300 hover:text-white hover:border-zinc-600"
+              }`}
+            id="pin-planner-toggle"
+            title="Plan pin assignments and catch conflicts before wiring"
+          >
+            <SlidersHorizontal size={13} />
+            <span>Pin Planner</span>
+            {planResult.errors > 0 && (
+              <span className="ml-0.5 inline-flex items-center justify-center min-w-[16px] h-4 px-1 rounded-full bg-red-500 text-white text-[9px] font-bold">
+                {planResult.errors}
+              </span>
+            )}
+          </button>
+
+          {/* Flash & Monitor toggle */}
+          <button
+            onClick={() => setFlashOpen((v) => !v)}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-all ${flashOpen
+                ? "bg-emerald-600 border-emerald-500 text-white"
+                : "bg-[#141416] border-[#2a2a2e] text-zinc-300 hover:text-white hover:border-zinc-600"
+              }`}
+            id="flash-monitor-toggle"
+            title="Compile, upload, and watch the serial monitor without leaving this page"
+          >
+            <Terminal size={13} />
+            <span>Flash &amp; Monitor</span>
+          </button>
 
           {/* Settings Indicator / Info indicator */}
           <div className="text-[10px] uppercase font-mono tracking-widest text-[#888888]">
@@ -883,6 +1325,317 @@ export default function App() {
               >
                 <X size={14} />
               </button>
+            </div>
+          )}
+
+          {/* ===================== FLASH & MONITOR PANEL ===================== */}
+          {flashOpen && (
+            <div className="bg-[#0c0c0d] border border-[#16241c] rounded-2xl p-4 space-y-3 shrink-0" id="flash-monitor">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2">
+                  <Terminal size={15} className="text-emerald-400" />
+                  <h3 className="text-sm font-serif text-[#f5f5f0]">Flash &amp; Monitor</h3>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="text-[10px] font-mono text-zinc-500">
+                    {arduinoStatus?.board ? (
+                      <>
+                        Target:{" "}
+                        <span className="text-emerald-300">{arduinoStatus.board.name}</span>
+                        {arduinoStatus.board.fqbn ? ` · ${arduinoStatus.board.fqbn}` : ""}
+                        {arduinoStatus.board.port ? ` · ${arduinoStatus.board.port}` : ""}
+                      </>
+                    ) : (
+                      <span className="text-amber-400/80">No board on USB</span>
+                    )}
+                  </span>
+                  <button onClick={() => setFlashOpen(false)} className="text-zinc-500 hover:text-white p-1" title="Close">
+                    <X size={14} />
+                  </button>
+                </div>
+              </div>
+
+              {/* Sketch picker */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[10px] uppercase font-mono text-zinc-500">Sketch:</span>
+                <select
+                  value={selectedSketch}
+                  onChange={(e) => setSelectedSketch(e.target.value)}
+                  className="bg-[#141416] border border-[#222] rounded px-2 py-1 text-[11px] text-zinc-200 focus:outline-none focus:border-zinc-600 max-w-[260px]"
+                >
+                  <option value="">{sketches.length ? "Pick a recent sketch…" : "No recent sketches found"}</option>
+                  {sketches.map((s) => (
+                    <option key={s.path} value={s.path}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={() =>
+                    fetch("/api/arduino/sketches")
+                      .then((r) => r.json())
+                      .then((d) => d?.ok && setSketches(d.sketches || []))
+                      .catch(() => {})
+                  }
+                  className="text-zinc-500 hover:text-white p-1"
+                  title="Refresh sketch list"
+                >
+                  <RotateCw size={12} />
+                </button>
+              </div>
+
+              {/* Actions */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={() => doBuild(false)}
+                  disabled={!!busy || !selectedSketch}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold border bg-[#141416] border-emerald-900/50 text-emerald-300 hover:text-white hover:border-emerald-600 disabled:opacity-40 transition-colors"
+                >
+                  {busy === "compile" ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
+                  Compile
+                </button>
+                <button
+                  onClick={() => doBuild(true)}
+                  disabled={!!busy || !selectedSketch || !arduinoStatus?.board?.port}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold border bg-emerald-600 border-emerald-500 text-white hover:bg-emerald-500 disabled:opacity-40 transition-colors"
+                >
+                  {busy === "upload" ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />}
+                  Compile &amp; Upload
+                </button>
+                {!arduinoStatus?.board?.port && (
+                  <span className="text-[10px] text-zinc-500">Plug a board into USB to enable upload.</span>
+                )}
+              </div>
+
+              {/* Build output */}
+              {buildOutput && (
+                <pre
+                  className={`text-[10px] font-mono whitespace-pre-wrap max-h-40 overflow-y-auto p-2 rounded-lg border ${buildOk === false
+                      ? "border-red-800/50 bg-red-950/20 text-red-300"
+                      : buildOk === true
+                      ? "border-emerald-800/50 bg-emerald-950/20 text-emerald-200"
+                      : "border-[#222] bg-[#0a0a0b] text-zinc-400"
+                    }`}
+                >
+                  {buildOutput}
+                </pre>
+              )}
+
+              {/* Serial monitor */}
+              <div className="border-t border-[#1a1a1c] pt-3 space-y-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[10px] uppercase font-mono text-zinc-500 flex items-center gap-1">
+                    <Terminal size={11} /> Serial Monitor
+                  </span>
+                  {!serialConnected ? (
+                    <button
+                      onClick={connectSerial}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-mono border bg-[#141416] border-emerald-900/50 text-emerald-300 hover:text-white hover:border-emerald-600 transition-colors"
+                    >
+                      Connect
+                    </button>
+                  ) : (
+                    <button
+                      onClick={disconnectSerial}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-mono border bg-red-950/30 border-red-800/50 text-red-300 hover:text-white transition-colors"
+                    >
+                      Disconnect
+                    </button>
+                  )}
+                  <select
+                    value={baud}
+                    onChange={(e) => setBaud(+e.target.value)}
+                    disabled={serialConnected}
+                    className="bg-[#141416] border border-[#222] rounded px-1.5 py-1 text-[10px] font-mono text-zinc-300 focus:outline-none disabled:opacity-50"
+                    title="Baud rate"
+                  >
+                    {[9600, 19200, 38400, 57600, 74880, 115200, 230400, 250000, 460800, 921600].map((b) => (
+                      <option key={b} value={b}>
+                        {b}
+                      </option>
+                    ))}
+                  </select>
+                  <button onClick={() => setSerialLines("")} className="text-[10px] font-mono text-zinc-500 hover:text-white px-1.5 py-1">
+                    Clear
+                  </button>
+                  <span className={`ml-auto inline-flex items-center gap-1 text-[9px] font-mono uppercase tracking-wider ${serialConnected ? "text-emerald-400" : "text-zinc-600"}`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${serialConnected ? "bg-emerald-500 animate-pulse" : "bg-zinc-600"}`}></span>
+                    {serialConnected ? "live" : "idle"}
+                  </span>
+                </div>
+                <pre
+                  ref={consoleRef}
+                  className="text-[10px] font-mono whitespace-pre-wrap h-40 overflow-y-auto p-2 rounded-lg border border-[#222] bg-black text-emerald-300/90"
+                >
+                  {serialLines || "[serial output appears here once you Connect]"}
+                </pre>
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    sendSerial();
+                  }}
+                  className="flex gap-2"
+                >
+                  <input
+                    value={serialInput}
+                    onChange={(e) => setSerialInput(e.target.value)}
+                    disabled={!serialConnected}
+                    placeholder={serialConnected ? "type a line and hit Send…" : "connect to send data…"}
+                    className="flex-1 bg-[#141416] border border-[#222] rounded px-2 py-1 text-[11px] text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-zinc-600 disabled:opacity-50"
+                  />
+                  <button
+                    type="submit"
+                    disabled={!serialConnected}
+                    className="inline-flex items-center gap-1 px-3 py-1 rounded text-[11px] font-semibold border bg-[#141416] border-[#2a2a2e] text-zinc-300 hover:text-white disabled:opacity-40"
+                  >
+                    <Send size={12} /> Send
+                  </button>
+                </form>
+                <p className="text-[9px] text-zinc-600 leading-relaxed">
+                  Web Serial (Chrome/Edge only). If Connect or Upload fails with a busy/locked port, close the Arduino IDE’s own Serial Monitor — only one program can hold a COM port at a time.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* ===================== PIN PLANNER PANEL ===================== */}
+          {plannerOpen && (
+            <div className="bg-[#0c0c0d] border border-[#2a2118] rounded-2xl p-4 space-y-3 shrink-0" id="pin-planner">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2">
+                  <SlidersHorizontal size={15} className="text-orange-400" />
+                  <h3 className="text-sm font-serif text-[#f5f5f0]">Pin Planner</h3>
+                  <span className="text-[10px] font-mono text-zinc-500">· {activeBoard.name}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  {planIsEsp32 && (
+                    <button
+                      onClick={() => setWifiInUse((v) => !v)}
+                      className={`inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-mono border transition-colors ${wifiInUse ? "bg-sky-950/40 border-sky-700 text-sky-300" : "bg-[#141416] border-[#2a2a2e] text-zinc-500"}`}
+                      title="ESP32 ADC2 pins can't be read while Wi-Fi is active"
+                    >
+                      <Wifi size={11} /> Wi-Fi {wifiInUse ? "ON" : "OFF"}
+                    </button>
+                  )}
+                  <button
+                    onClick={copyPlan}
+                    disabled={assignments.length === 0}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-mono border bg-[#141416] border-[#2a2a2e] text-zinc-300 hover:text-white disabled:opacity-40 transition-colors"
+                  >
+                    <ClipboardCheck size={11} className={planCopied ? "text-emerald-400" : ""} />
+                    {planCopied ? "Copied" : "Copy plan"}
+                  </button>
+                  <button onClick={() => setPlannerOpen(false)} className="text-zinc-500 hover:text-white p-1" title="Close planner">
+                    <X size={14} />
+                  </button>
+                </div>
+              </div>
+
+              {assignments.length > 0 && (
+                <div className={`flex items-center gap-2 text-[11px] font-mono px-3 py-2 rounded-lg border ${planResult.errors > 0 ? "bg-red-950/30 border-red-800/50 text-red-300" : planResult.warnings > 0 ? "bg-amber-950/25 border-amber-800/50 text-amber-300" : "bg-emerald-950/25 border-emerald-800/50 text-emerald-300"}`}>
+                  {planResult.errors > 0 ? <AlertOctagon size={13} /> : planResult.warnings > 0 ? <AlertTriangle size={13} /> : <CheckCircle2 size={13} />}
+                  <span>
+                    {planResult.errors} error{planResult.errors !== 1 ? "s" : ""} · {planResult.warnings} warning{planResult.warnings !== 1 ? "s" : ""}
+                    {planResult.errors === 0 && planResult.warnings === 0 ? " · layout looks safe to boot" : ""}
+                  </span>
+                </div>
+              )}
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[10px] uppercase font-mono text-zinc-500">Quick add:</span>
+                {[
+                  { id: "i2c", label: "+ I²C" },
+                  { id: "spi", label: "+ SPI" },
+                  { id: "uart", label: "+ UART" },
+                ].map((b) => (
+                  <button
+                    key={b.id}
+                    onClick={() => quickAddBus(b.id as "i2c" | "spi" | "uart")}
+                    className="px-2 py-1 rounded text-[10px] font-mono border bg-[#141416] border-[#2a2a2e] text-zinc-300 hover:text-white hover:border-zinc-600 transition-colors"
+                  >
+                    {b.label}
+                  </button>
+                ))}
+                <button
+                  onClick={() => addAssignment("dout")}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-mono border bg-orange-950/30 border-orange-800/50 text-orange-300 hover:text-white transition-colors"
+                >
+                  <Plus size={11} /> Pin
+                </button>
+              </div>
+
+              {assignments.length === 0 ? (
+                <p className="text-[11px] text-zinc-500 leading-relaxed">
+                  Assign pins to jobs (I²C, SPI, a sensor, a MOSFET gate…) and conflicts are flagged live — double-booked pins, input-only pins driven as outputs, ESP32 flash &amp; strapping pins, and ADC2-while-Wi-Fi. Assigned pins light up on the board below.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {assignments.map((a) => {
+                    const res = planResult.perAssignment[a.id];
+                    const sev = res?.severity || "ok";
+                    return (
+                      <div key={a.id} className="bg-[#0a0a0b] border border-[#1a1a1c] rounded-lg p-2 space-y-1.5">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="shrink-0">
+                            {sev === "error" ? (
+                              <AlertOctagon size={14} className="text-red-500" />
+                            ) : sev === "warn" ? (
+                              <AlertTriangle size={14} className="text-amber-400" />
+                            ) : (
+                              <CheckCircle2 size={14} className="text-emerald-500" />
+                            )}
+                          </span>
+                          <input
+                            value={a.label || ""}
+                            onChange={(e) => updateAssignment(a.id, { label: e.target.value })}
+                            placeholder="label (e.g. BME280)"
+                            className="w-28 bg-[#141416] border border-[#222] rounded px-2 py-1 text-[11px] text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-zinc-600"
+                          />
+                          <select
+                            value={a.roleId}
+                            onChange={(e) => updateAssignment(a.id, { roleId: e.target.value })}
+                            className="bg-[#141416] border border-[#222] rounded px-2 py-1 text-[11px] text-zinc-200 focus:outline-none focus:border-zinc-600"
+                          >
+                            {["I²C", "SPI", "UART", "GPIO"].map((g) => (
+                              <optgroup key={g} label={g}>
+                                {PLANNER_ROLES.filter((r) => r.group === g).map((r) => (
+                                  <option key={r.id} value={r.id}>
+                                    {r.label}
+                                  </option>
+                                ))}
+                              </optgroup>
+                            ))}
+                          </select>
+                          <select
+                            value={a.pinName}
+                            onChange={(e) => updateAssignment(a.id, { pinName: e.target.value })}
+                            className={`bg-[#141416] border rounded px-2 py-1 text-[11px] focus:outline-none focus:border-zinc-600 ${a.pinName ? "text-zinc-200 border-[#222]" : "text-zinc-500 border-[#3a2a1a]"}`}
+                          >
+                            <option value="">pin…</option>
+                            {assignablePins.map((p) => (
+                              <option key={p.number} value={p.name}>
+                                {p.name} (G{p.gpio})
+                              </option>
+                            ))}
+                          </select>
+                          <button onClick={() => removeAssignment(a.id)} className="ml-auto text-zinc-600 hover:text-red-400 p-1" title="Remove">
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                        {res && res.messages.length > 0 && (
+                          <div className="pl-6 space-y-0.5">
+                            {res.messages.map((m, i) => (
+                              <p key={i} className={`text-[10px] leading-snug ${m.sev === "error" ? "text-red-400" : "text-amber-400/90"}`}>
+                                {m.text}
+                              </p>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 

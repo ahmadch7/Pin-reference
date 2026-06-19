@@ -21,6 +21,13 @@ and shows its pinout automatically.
   it and shows its pinout; unplug it and it clears. Genuine boards (e.g. Arduino Uno)
   are identified directly from USB; clone boards (CH340/CP2102) borrow the identity
   you've selected in the Arduino IDE.
+- **Pin Planner** — assign pins to jobs (I²C, SPI, UART, a sensor, a MOSFET gate…) and
+  conflicts are flagged live: double-booked pins, input-only pins driven as outputs,
+  ESP32 flash (GPIO 6–11) and strapping/boot pins, and ADC2-while-Wi-Fi. Assigned pins
+  light up on the board map, and the plan exports as a Markdown table.
+- **Flash & Monitor** — compile and upload a sketch to the connected board straight
+  from the page using the bundled `arduino-cli`, then watch (and write to) the serial
+  port via the browser's Web Serial API — without switching to the Arduino IDE.
 - **Dynamic catalog** — search any other chip and a pinout is generated on demand via
   the Gemini API.
 

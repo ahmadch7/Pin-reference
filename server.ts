@@ -367,6 +367,108 @@ app.get("/api/arduino/board", async (_req, res) => {
   }
 });
 
+/* ------------------------------------------------------------------ *
+ *  COMPILE / UPLOAD  —  flash a sketch straight from the website using
+ *  the arduino-cli bundled with Arduino IDE. Cores are shared with the
+ *  IDE (Arduino15 data dir), so whatever compiles in the IDE compiles here.
+ * ------------------------------------------------------------------ */
+
+function uriToWinPath(uri: string): string {
+  let p = uri.replace(/^file:\/\/\//, "");
+  try {
+    p = decodeURIComponent(p);
+  } catch {
+    /* keep raw */
+  }
+  return p.replace(/\//g, "\\");
+}
+
+// arduino-cli wants the sketch FOLDER (the one named like the .ino inside it).
+function sketchDirOf(p: string): string {
+  return /\.ino$/i.test(p) ? path.dirname(p) : p;
+}
+
+// Recently-opened sketches that still exist on disk and contain a .ino.
+function listRecentSketches(): { name: string; path: string; ts: number }[] {
+  try {
+    const f = path.join(os.homedir(), ".arduinoIDE", "recent-sketches.json");
+    const obj = JSON.parse(fs.readFileSync(f, "utf8")) as Record<string, number>;
+    const seen = new Set<string>();
+    const out: { name: string; path: string; ts: number }[] = [];
+    for (const [uri, ts] of Object.entries(obj)) {
+      const dir = sketchDirOf(uriToWinPath(uri));
+      const key = dir.toLowerCase();
+      if (seen.has(key)) continue;
+      try {
+        if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) continue;
+        // A real Arduino sketch folder contains <folderName>.ino.
+        const base = path.basename(dir).toLowerCase();
+        const inos = fs.readdirSync(dir).filter((n) => n.toLowerCase().endsWith(".ino"));
+        if (!inos.some((n) => n.toLowerCase() === `${base}.ino`)) continue;
+      } catch {
+        continue;
+      }
+      seen.add(key);
+      out.push({ name: path.basename(dir), path: dir, ts: typeof ts === "number" ? ts : 0 });
+    }
+    return out.sort((a, b) => b.ts - a.ts);
+  } catch {
+    return [];
+  }
+}
+
+function runArduinoCli(
+  args: string[],
+  timeoutMs = 180000
+): Promise<{ success: boolean; output: string }> {
+  return new Promise((resolve) => {
+    const cli = getBundledArduinoCli();
+    if (!cli) return resolve({ success: false, output: "arduino-cli not found — is Arduino IDE installed?" });
+    execFile(
+      cli,
+      args,
+      { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
+      (err, stdout, stderr) => {
+        const output = `${stdout || ""}${stderr || ""}`.trim();
+        resolve({ success: !err, output: output || (err ? String((err as any).message) : "") });
+      }
+    );
+  });
+}
+
+app.get("/api/arduino/sketches", (_req, res) => {
+  const sketches = listRecentSketches();
+  res.json({ ok: true, sketches, active: sketches[0]?.path || null });
+});
+
+app.post("/api/arduino/compile", async (req, res) => {
+  let { path: sketch, fqbn } = (req.body || {}) as { path?: string; fqbn?: string };
+  if (!fqbn) fqbn = readSelectedBoardFromIde()?.fqbn;
+  if (!sketch) sketch = listRecentSketches()[0]?.path;
+  if (!sketch || !fqbn) {
+    return res.json({ ok: false, success: false, output: "Need a sketch and a board (FQBN) — open a sketch and select a board in the Arduino IDE." });
+  }
+  const r = await runArduinoCli(["compile", "--fqbn", fqbn, sketch]);
+  res.json({ ok: true, success: r.success, output: r.output, sketch, fqbn });
+});
+
+app.post("/api/arduino/upload", async (req, res) => {
+  let { path: sketch, fqbn, port } = (req.body || {}) as { path?: string; fqbn?: string; port?: string };
+  const ide = readSelectedBoardFromIde();
+  if (!fqbn) fqbn = ide?.fqbn;
+  if (!port) {
+    const cli = await getConnectedPorts();
+    port = cli.find((p) => p.detectedFqbn)?.address || cli.find((p) => p.vid)?.address || ide?.idePort || undefined;
+  }
+  if (!sketch) sketch = listRecentSketches()[0]?.path;
+  if (!sketch || !fqbn || !port) {
+    return res.json({ ok: false, success: false, output: "Need a sketch, a board (FQBN), and a connected port." });
+  }
+  // compile + upload in one shot so the flash is always fresh.
+  const r = await runArduinoCli(["compile", "--upload", "-p", port, "--fqbn", fqbn, sketch]);
+  res.json({ ok: true, success: r.success, output: r.output, sketch, fqbn, port });
+});
+
 // Initialize Gemini Client
 const apiKey = process.env.GEMINI_API_KEY;
 let aiClient: GoogleGenAI | null = null;
