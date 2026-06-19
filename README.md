@@ -28,6 +28,16 @@ and shows its pinout automatically.
 - **Flash & Monitor** — compile and upload a sketch to the connected board straight
   from the page using the bundled `arduino-cli`, then watch (and write to) the serial
   port via the browser's Web Serial API — without switching to the Arduino IDE.
+- **Peripheral code generator** — pick a board and a bus and get correct init
+  boilerplate using that board's real default pins (Arduino C++ for ESP32 / ESP8266 /
+  AVR / RP2040, HAL stubs for STM32).
+- **Reverse pin search** — find pins by capability ("every PWM pin", "5V-tolerant",
+  "interrupt", "ADC", "touch"…). Board-aware, so the answer is right per chip family.
+- **Wiring helper** — pick a sensor/module (VL53L1X, BME280, MPU6050, HC-SR04,
+  nRF24L01, DS18B20, NEO-6M…) and get a wiring table to the selected board plus a
+  3.3 V / 5 V level-compatibility check.
+- **Board compare** — line up boards side by side (specs, voltages, pin counts) to
+  pick the right one for a project.
 - **Dynamic catalog** — search any other chip and a pinout is generated on demand via
   the Gemini API.
 

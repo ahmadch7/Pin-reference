@@ -29,7 +29,11 @@ import {
   Play,
   Send,
   RotateCw,
-  Loader2
+  Loader2,
+  Code2,
+  Copy,
+  Cable,
+  GitCompare
 } from "lucide-react";
 import { preloadedBoards } from "./data/preloadedBoards";
 import { MicrocontrollerBoard, BoardPin } from "./types";
@@ -401,6 +405,574 @@ function findPinByFeature(
   return hit ? hit.name : "";
 }
 
+// ============================================================================
+//  PERIPHERAL CODE GENERATOR  —  board + bus -> correct init boilerplate
+// ============================================================================
+
+type Bus = "i2c" | "spi" | "uart";
+
+function boardFamily(board: MicrocontrollerBoard): "esp32" | "esp8266" | "stm32" | "rp2040" | "avr" | "arduino" {
+  const blob = `${board.id || ""} ${board.specs?.architecture || ""} ${board.name || ""}`.toLowerCase();
+  if (/esp32/.test(blob)) return "esp32";
+  if (/esp8266|nodemcu/.test(blob)) return "esp8266";
+  if (/stm32|cortex-m|blue ?pill/.test(blob)) return "stm32";
+  if (/rp2040|pico/.test(blob)) return "rp2040";
+  if (/avr|atmega|attiny|uno|nano|mega|leonardo/.test(blob)) return "avr";
+  return "arduino";
+}
+
+// GPIO number for the first pin matching any keyword (skipping `avoid` words).
+function busPinGpio(board: MicrocontrollerBoard, includes: string[], avoid: string[] = []): string | null {
+  const p = board.pins.find((pp) => {
+    if (!pp.gpio || pp.gpio === "N/A") return false;
+    const hay = `${pp.name} ${(pp.features || []).join(" ")} ${pp.primary}`.toLowerCase();
+    const caut = (pp.caution || "").toLowerCase();
+    if (avoid.some((a) => hay.includes(a) || caut.includes(a))) return false;
+    return includes.some((k) => hay.includes(k));
+  });
+  return p ? p.gpio : null;
+}
+
+const FAMILY_LABEL: Record<string, string> = {
+  esp32: "Arduino — ESP32 core (C++)",
+  esp8266: "Arduino — ESP8266 core (C++)",
+  avr: "Arduino — AVR (C++)",
+  rp2040: "Arduino — RP2040 / Pico core (C++)",
+  stm32: "STM32 HAL (C)",
+  arduino: "Arduino (C++)",
+};
+
+function generatePeripheralCode(board: MicrocontrollerBoard, bus: Bus): { framework: string; code: string } {
+  const fam = boardFamily(board);
+  const framework = FAMILY_LABEL[fam];
+
+  // Pull real default pins from the board; fall back to family conventions.
+  const sda = busPinGpio(board, ["sda"]) || (fam === "esp8266" ? "4" : fam === "rp2040" ? "4" : "21");
+  const scl = busPinGpio(board, ["scl"]) || (fam === "esp8266" ? "5" : fam === "rp2040" ? "5" : "22");
+  // Prefer VSPI on ESP32 (it's the recommended bus; HSPI overlaps strapping pins
+  // like GPIO12). Fall back to any SPI pin that isn't an HSPI/strapping one.
+  const sck = busPinGpio(board, ["vspi_sck"]) || busPinGpio(board, ["sck", "spi_clk", "_clk"], ["hspi"]) || "18";
+  const miso = busPinGpio(board, ["vspi_miso"]) || busPinGpio(board, ["miso"], ["hspi"]) || (fam === "rp2040" ? "16" : "19");
+  const mosi = busPinGpio(board, ["vspi_mosi"]) || busPinGpio(board, ["mosi"], ["hspi"]) || (fam === "rp2040" ? "19" : "23");
+  const cs = busPinGpio(board, ["vspi_cs"]) || busPinGpio(board, ["spi_cs", "ss"], ["hspi"]) || (fam === "rp2040" ? "17" : "5");
+  const tx = busPinGpio(board, ["uart2_tx", "txd", "tx"], ["debug", "usb", "uart0"]) || "17";
+  const rx = busPinGpio(board, ["uart2_rx", "rxd", "rx"], ["debug", "usb", "uart0"]) || "16";
+
+  if (fam === "stm32") {
+    if (bus === "i2c")
+      return {
+        framework,
+        code: `/* STM32 HAL — I2C init (CubeMX generates this; shown for reference) */
+#include "stm32f4xx_hal.h"   // match your series (F1/F4/...)
+
+I2C_HandleTypeDef hi2c1;
+
+void MX_I2C1_Init(void) {
+  hi2c1.Instance             = I2C1;
+  hi2c1.Init.ClockSpeed      = 100000;            // 100 kHz standard mode
+  hi2c1.Init.DutyCycle       = I2C_DUTYCYCLE_2;
+  hi2c1.Init.OwnAddress1     = 0;
+  hi2c1.Init.AddressingMode  = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode   = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK) { Error_Handler(); }
+}
+
+/* Default pins: SDA = PB7, SCL = PB6 (or remap PB9/PB8). Set these in
+   MX_GPIO_Init() with GPIO_AF4_I2C1. Read a register: */
+uint8_t buf[2];
+HAL_I2C_Mem_Read(&hi2c1, (0x68 << 1), 0x75, 1, buf, 1, 100);`,
+      };
+    if (bus === "spi")
+      return {
+        framework,
+        code: `/* STM32 HAL — SPI init (CubeMX generates this; shown for reference) */
+#include "stm32f4xx_hal.h"
+
+SPI_HandleTypeDef hspi1;
+
+void MX_SPI1_Init(void) {
+  hspi1.Instance               = SPI1;
+  hspi1.Init.Mode              = SPI_MODE_MASTER;
+  hspi1.Init.Direction         = SPI_DIRECTION_2LINES;
+  hspi1.Init.DataSize          = SPI_DATASIZE_8BIT;
+  hspi1.Init.CLKPolarity       = SPI_POLARITY_LOW;   // CPOL=0
+  hspi1.Init.CLKPhase          = SPI_PHASE_1EDGE;    // CPHA=0  (mode 0)
+  hspi1.Init.NSS               = SPI_NSS_SOFT;       // drive CS in software
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16;
+  hspi1.Init.FirstBit          = SPI_FIRSTBIT_MSB;
+  if (HAL_SPI_Init(&hspi1) != HAL_OK) { Error_Handler(); }
+}
+
+/* Default pins: SCK = PA5, MISO = PA6, MOSI = PA7, CS = your GPIO (software).
+   Transfer one byte: */
+uint8_t tx = 0x9F, rx = 0;
+HAL_GPIO_WritePin(CS_GPIO_Port, CS_Pin, GPIO_PIN_RESET);
+HAL_SPI_TransmitReceive(&hspi1, &tx, &rx, 1, 100);
+HAL_GPIO_WritePin(CS_GPIO_Port, CS_Pin, GPIO_PIN_SET);`,
+      };
+    return {
+      framework,
+      code: `/* STM32 HAL — UART init (CubeMX generates this; shown for reference) */
+#include "stm32f4xx_hal.h"
+
+UART_HandleTypeDef huart2;
+
+void MX_USART2_UART_Init(void) {
+  huart2.Instance        = USART2;
+  huart2.Init.BaudRate   = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits   = UART_STOPBITS_1;
+  huart2.Init.Parity     = UART_PARITY_NONE;
+  huart2.Init.Mode       = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl  = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK) { Error_Handler(); }
+}
+
+/* Default pins: TX = PA2, RX = PA3 (AF7). Send a string: */
+char msg[] = "hello\\r\\n";
+HAL_UART_Transmit(&huart2, (uint8_t*)msg, sizeof(msg) - 1, 100);`,
+    };
+  }
+
+  // ---- Arduino-framework families (esp32 / esp8266 / avr / rp2040 / generic) ----
+  if (bus === "i2c") {
+    let begin: string;
+    let note: string;
+    if (fam === "avr") {
+      begin = "  Wire.begin();";
+      note = "  // Uno/Nano: SDA = A4, SCL = A5 (fixed). Mega: SDA = 20, SCL = 21.";
+    } else if (fam === "rp2040") {
+      begin = `  Wire.setSDA(${sda});\n  Wire.setSCL(${scl});\n  Wire.begin();`;
+      note = `  // Pico: SDA = GP${sda}, SCL = GP${scl}`;
+    } else {
+      begin = `  Wire.begin(${sda}, ${scl});`;
+      note = `  // SDA = GPIO${sda}, SCL = GPIO${scl}`;
+    }
+    return {
+      framework,
+      code: `#include <Wire.h>
+
+void setup() {
+  Serial.begin(115200);
+${begin}
+${note}
+  // Wire.setClock(400000);  // optional: 400 kHz fast mode
+
+  // --- quick I2C scanner: prints every device address found ---
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      Serial.print("Found device at 0x");
+      Serial.println(addr, HEX);
+    }
+  }
+}
+
+void loop() {
+}`,
+    };
+  }
+
+  if (bus === "spi") {
+    let begin: string;
+    let note: string;
+    if (fam === "avr") {
+      begin = "  SPI.begin();";
+      note = "  // Uno/Nano: SCK = 13, MISO = 12, MOSI = 11, SS = 10 (fixed)";
+    } else if (fam === "esp8266") {
+      begin = "  SPI.begin();";
+      note = "  // ESP8266 HSPI: SCK = GPIO14, MISO = GPIO12, MOSI = GPIO13";
+    } else if (fam === "rp2040") {
+      begin = `  SPI.setSCK(${sck});\n  SPI.setRX(${miso});\n  SPI.setTX(${mosi});\n  SPI.begin();`;
+      note = `  // Pico: SCK = GP${sck}, MISO(RX) = GP${miso}, MOSI(TX) = GP${mosi}`;
+    } else {
+      begin = `  SPI.begin(${sck}, ${miso}, ${mosi}, CS_PIN);`;
+      note = `  // SCK = GPIO${sck}, MISO = GPIO${miso}, MOSI = GPIO${mosi}, CS = GPIO${cs}`;
+    }
+    return {
+      framework,
+      code: `#include <SPI.h>
+
+const int CS_PIN = ${fam === "avr" ? "10" : cs};
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(CS_PIN, OUTPUT);
+  digitalWrite(CS_PIN, HIGH);   // deselect
+${begin}
+${note}
+
+  // --- example: read one register from a SPI device ---
+  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(CS_PIN, LOW);
+  SPI.transfer(0x80 | 0x00);    // read bit + register address
+  uint8_t val = SPI.transfer(0x00);
+  digitalWrite(CS_PIN, HIGH);
+  SPI.endTransaction();
+  Serial.println(val, HEX);
+}
+
+void loop() {
+}`,
+    };
+  }
+
+  // UART
+  if (fam === "esp32") {
+    return {
+      framework,
+      code: `// ESP32 has 3 UARTs. Serial = USB debug; Serial2 = spare on GPIO${rx}/GPIO${tx}.
+void setup() {
+  Serial.begin(115200);                          // USB / debug
+  Serial2.begin(9600, SERIAL_8N1, ${rx}, ${tx});   // RX = GPIO${rx}, TX = GPIO${tx}
+}
+
+void loop() {
+  // echo whatever arrives on Serial2 back out to it
+  if (Serial2.available()) {
+    char c = Serial2.read();
+    Serial.write(c);     // mirror to USB
+    Serial2.write(c);    // echo to device
+  }
+}`,
+    };
+  }
+  return {
+    framework,
+    code: `// ${fam === "avr" ? "Uno/Nano: TX = D1, RX = D0 (shared with USB)." : "Hardware UART"}
+void setup() {
+  Serial.begin(9600);
+}
+
+void loop() {
+  if (Serial.available()) {
+    char c = Serial.read();
+    Serial.write(c);   // echo back
+  }
+}`,
+  };
+}
+
+// ============================================================================
+//  SENSOR / MODULE WIRING HELPER  —  how do I hook this part to this board?
+// ============================================================================
+interface SensorPin {
+  sig: string; // silkscreen label on the module
+  role: "vcc" | "gnd" | "sda" | "scl" | "mosi" | "miso" | "sck" | "cs" | "tx" | "rx" | "adc" | "data" | "gpio";
+  note?: string;
+}
+interface SensorDef {
+  id: string;
+  name: string;
+  iface: "I²C" | "SPI" | "UART" | "Analog" | "1-Wire";
+  vcc: string; // human-readable supply spec
+  rail: "3.3" | "5" | "either"; // which board rail to power it from
+  logic: "3.3" | "5" | "either"; // module's I/O logic level
+  inputs5vTolerant?: boolean; // module inputs survive 5 V even if it's a 3.3 V part
+  pins: SensorPin[];
+  notes?: string[];
+}
+
+const SENSORS: SensorDef[] = [
+  {
+    id: "vl53l1x",
+    name: "VL53L1X ToF distance (breakout)",
+    iface: "I²C",
+    vcc: "2.6–5.5 V (onboard regulator)",
+    rail: "either",
+    logic: "either",
+    pins: [
+      { sig: "VIN", role: "vcc" },
+      { sig: "GND", role: "gnd" },
+      { sig: "SDA", role: "sda" },
+      { sig: "SCL", role: "scl" },
+      { sig: "XSHUT", role: "gpio", note: "optional — drive LOW to reset / for address change" },
+      { sig: "GPIO1", role: "gpio", note: "optional interrupt out" },
+    ],
+    notes: [
+      "Common breakouts (Pololu/Adafruit) have a regulator + I²C level shifters, so they run on 3.3 V or 5 V boards.",
+      "The bare chip is 2.8 V only — these notes assume a breakout board.",
+      "Default I²C address 0x29; pull XSHUT low per-sensor to run several on one bus.",
+    ],
+  },
+  {
+    id: "bme280",
+    name: "BME280 temp / humidity / pressure",
+    iface: "I²C",
+    vcc: "3.3–5 V (GY-BME280 has regulator)",
+    rail: "either",
+    logic: "either",
+    pins: [
+      { sig: "VCC/VIN", role: "vcc" },
+      { sig: "GND", role: "gnd" },
+      { sig: "SDA/SDI", role: "sda" },
+      { sig: "SCL/SCK", role: "scl" },
+    ],
+    notes: ["Address 0x76 or 0x77 (SDO pin selects). Bare BMP280 modules without a regulator are 3.3 V only."],
+  },
+  {
+    id: "mpu6050",
+    name: "MPU-6050 IMU (GY-521)",
+    iface: "I²C",
+    vcc: "3–5 V (onboard regulator)",
+    rail: "either",
+    logic: "either",
+    pins: [
+      { sig: "VCC", role: "vcc" },
+      { sig: "GND", role: "gnd" },
+      { sig: "SDA", role: "sda" },
+      { sig: "SCL", role: "scl" },
+      { sig: "INT", role: "gpio", note: "optional data-ready interrupt" },
+      { sig: "AD0", role: "gpio", note: "address select: low=0x68, high=0x69" },
+    ],
+    notes: ["GY-521 has a regulator + logic that tolerates 3.3 V and 5 V."],
+  },
+  {
+    id: "ssd1306",
+    name: "SSD1306 OLED 128×64 (I²C)",
+    iface: "I²C",
+    vcc: "3.3–5 V",
+    rail: "either",
+    logic: "either",
+    pins: [
+      { sig: "VCC", role: "vcc" },
+      { sig: "GND", role: "gnd" },
+      { sig: "SDA", role: "sda" },
+      { sig: "SCL", role: "scl" },
+    ],
+    notes: ["Address usually 0x3C. Cheap modules vary 3.3–5 V; check the silkscreen."],
+  },
+  {
+    id: "ds3231",
+    name: "DS3231 RTC",
+    iface: "I²C",
+    vcc: "3.3–5.5 V",
+    rail: "either",
+    logic: "either",
+    pins: [
+      { sig: "VCC", role: "vcc" },
+      { sig: "GND", role: "gnd" },
+      { sig: "SDA", role: "sda" },
+      { sig: "SCL", role: "scl" },
+    ],
+    notes: ["Address 0x68. Some boards trickle-charge a LIR2032 — don't fit a non-rechargeable CR2032 on those."],
+  },
+  {
+    id: "hcsr04",
+    name: "HC-SR04 ultrasonic",
+    iface: "Analog",
+    vcc: "5 V",
+    rail: "5",
+    logic: "5",
+    pins: [
+      { sig: "VCC", role: "vcc" },
+      { sig: "TRIG", role: "gpio" },
+      { sig: "ECHO", role: "gpio", note: "5 V output — level-shift on 3.3 V boards" },
+      { sig: "GND", role: "gnd" },
+    ],
+    notes: [
+      "Needs a 5 V supply to work reliably.",
+      "ECHO drives 5 V. On a 3.3 V board (ESP32 etc.) put a divider on ECHO (e.g. 1 kΩ + 2 kΩ) or a level shifter — 5 V straight into a 3.3 V GPIO can damage it.",
+    ],
+  },
+  {
+    id: "ds18b20",
+    name: "DS18B20 temperature (1-Wire)",
+    iface: "1-Wire",
+    vcc: "3.0–5.5 V",
+    rail: "either",
+    logic: "either",
+    pins: [
+      { sig: "VDD", role: "vcc" },
+      { sig: "DQ", role: "data", note: "needs a 4.7 kΩ pull-up to VCC" },
+      { sig: "GND", role: "gnd" },
+    ],
+    notes: ["Add one 4.7 kΩ pull-up from DQ to VCC for the whole bus. Logic follows whatever VCC you use."],
+  },
+  {
+    id: "neo6m",
+    name: "NEO-6M GPS",
+    iface: "UART",
+    vcc: "3.3–5 V (module regulator)",
+    rail: "either",
+    logic: "3.3",
+    inputs5vTolerant: true,
+    pins: [
+      { sig: "VCC", role: "vcc" },
+      { sig: "GND", role: "gnd" },
+      { sig: "TX", role: "tx", note: "→ board RX" },
+      { sig: "RX", role: "rx", note: "← board TX" },
+    ],
+    notes: ["Cross TX↔RX. Module TX idles at ~3.3 V (reads fine on a 5 V board). Default 9600 baud."],
+  },
+  {
+    id: "nrf24l01",
+    name: "nRF24L01 2.4 GHz radio",
+    iface: "SPI",
+    vcc: "3.3 V ONLY (max 3.6 V)",
+    rail: "3.3",
+    logic: "3.3",
+    inputs5vTolerant: true,
+    pins: [
+      { sig: "VCC", role: "vcc", note: "3.3 V only — 5 V destroys it" },
+      { sig: "GND", role: "gnd" },
+      { sig: "CE", role: "gpio" },
+      { sig: "CSN", role: "cs" },
+      { sig: "SCK", role: "sck" },
+      { sig: "MOSI", role: "mosi" },
+      { sig: "MISO", role: "miso" },
+      { sig: "IRQ", role: "gpio", note: "optional interrupt" },
+    ],
+    notes: [
+      "Power VCC from 3.3 V ONLY — 5 V will kill it. Its logic inputs are 5 V tolerant, so a 5 V MCU's SPI lines are fine.",
+      "Add a 10 µF cap across VCC/GND right at the module — brown-outs during TX are the #1 cause of flaky links.",
+    ],
+  },
+  {
+    id: "sdcard",
+    name: "microSD card module (SPI)",
+    iface: "SPI",
+    vcc: "3.3–5 V (modules with regulator)",
+    rail: "either",
+    logic: "either",
+    pins: [
+      { sig: "VCC", role: "vcc" },
+      { sig: "GND", role: "gnd" },
+      { sig: "SCK", role: "sck" },
+      { sig: "MOSI", role: "mosi" },
+      { sig: "MISO", role: "miso" },
+      { sig: "CS", role: "cs" },
+    ],
+    notes: ["Modules with a regulator + level shifter take 5 V. A bare card holder is 3.3 V only — never feed a raw card 5 V."],
+  },
+];
+
+function parseBoardLogic(board: MicrocontrollerBoard): "3.3" | "5" {
+  return /5\s*v\s*logic|^5\.0|^5v/i.test(board.specs?.operatingVoltage || "") ? "5" : "3.3";
+}
+
+interface WiringRow { module: string; board: string; note?: string }
+function generateWiring(board: MicrocontrollerBoard, sensor: SensorDef): {
+  rows: WiringRow[];
+  rail: string;
+  issues: { sev: "ok" | "warn" | "error"; text: string }[];
+} {
+  const pinName = (re: RegExp) => {
+    const p = board.pins.find((pp) => re.test(pp.name.toLowerCase()) || re.test((pp.primary || "").toLowerCase()));
+    return p?.name;
+  };
+  const v33 = pinName(/3v3|3\.3\s*v/);
+  const v5 = pinName(/\b5v\b|vin/);
+  const gnd = pinName(/gnd|ground/) || "GND";
+  const boardLogic = parseBoardLogic(board);
+
+  // which rail powers the module
+  let rail: string;
+  if (sensor.rail === "5") rail = v5 || "5V (external)";
+  else if (sensor.rail === "3.3") rail = v33 || "3.3V (external)";
+  else rail = boardLogic === "5" ? v5 || v33 || "5V" : v33 || v5 || "3.3V";
+
+  const sda = findPinByFeature(board, ["sda"]) || "SDA";
+  const scl = findPinByFeature(board, ["scl"]) || "SCL";
+  const mosi = findPinByFeature(board, ["vspi_mosi"]) || findPinByFeature(board, ["mosi"], ["hspi"]) || "MOSI";
+  const miso = findPinByFeature(board, ["vspi_miso"]) || findPinByFeature(board, ["miso"], ["hspi"]) || "MISO";
+  const sck = findPinByFeature(board, ["vspi_sck"]) || findPinByFeature(board, ["sck", "_clk"], ["hspi"]) || "SCK";
+  const btx = findPinByFeature(board, ["uart2_tx", "txd", "tx"], ["debug", "usb", "uart0"]) || "TX";
+  const brx = findPinByFeature(board, ["uart2_rx", "rxd", "rx"], ["debug", "usb", "uart0"]) || "RX";
+  const adc = findPinByFeature(board, ["adc", "analog"]) || "an ADC pin";
+
+  const roleToBoard = (role: SensorPin["role"]): string => {
+    switch (role) {
+      case "vcc": return rail;
+      case "gnd": return gnd;
+      case "sda": return sda;
+      case "scl": return scl;
+      case "mosi": return mosi;
+      case "miso": return miso;
+      case "sck": return sck;
+      case "cs": return "any free GPIO (chip-select)";
+      case "tx": return brx; // module TX -> board RX
+      case "rx": return btx; // module RX -> board TX
+      case "adc": return adc;
+      case "data": return "any free GPIO";
+      case "gpio": return "any free GPIO";
+    }
+  };
+
+  const rows = sensor.pins.map((p) => ({ module: p.sig, board: roleToBoard(p.role), note: p.note }));
+
+  const issues: { sev: "ok" | "warn" | "error"; text: string }[] = [];
+  // supply rail availability
+  if (sensor.rail === "3.3" && !v33) issues.push({ sev: "error", text: "This module needs a 3.3 V supply, but this board doesn't expose a 3.3 V pin. Power it from an external 3.3 V regulator." });
+  if (sensor.rail === "5" && !v5) issues.push({ sev: "warn", text: "This module wants 5 V; this board has no 5 V / VIN pin. Power it from USB 5 V or an external supply, with grounds tied together." });
+
+  // logic-level compatibility
+  if (sensor.logic === "either") {
+    issues.push({ sev: "ok", text: `Logic levels are compatible — module works at this board's ${boardLogic} V logic.` });
+  } else if (sensor.logic === boardLogic) {
+    issues.push({ sev: "ok", text: `Logic levels match (${boardLogic} V).` });
+  } else if (boardLogic === "3.3" && sensor.logic === "5") {
+    issues.push({ sev: "warn", text: "Module I/O is 5 V but the board is 3.3 V. Level-shift the module's OUTPUT lines down to 3.3 V before they hit a GPIO." });
+  } else if (boardLogic === "5" && sensor.logic === "3.3") {
+    if (sensor.inputs5vTolerant)
+      issues.push({ sev: "warn", text: "Board I/O is 5 V; module is a 3.3 V part but its inputs tolerate 5 V. Keep VCC at 3.3 V — only the supply is the risk here." });
+    else
+      issues.push({ sev: "warn", text: "Board I/O is 5 V but the module is 3.3 V — 5 V on its pins can damage it. Use a level shifter (and 3.3 V supply)." });
+  }
+
+  return { rows, rail, issues };
+}
+
+// ============================================================================
+//  REVERSE PIN SEARCH  —  "show every PWM / 5V-tolerant / interrupt pin"
+// ============================================================================
+// Board-aware because some capabilities are universal-but-untagged (every ESP32
+// GPIO does PWM and interrupts) and some are board-level (5V tolerance).
+function pinMatchesCapability(pin: BoardPin, board: MicrocontrollerBoard, queryRaw: string): boolean {
+  const q = queryRaw.trim().toLowerCase();
+  if (!q) return true;
+
+  const text = `${pin.name} ${pin.primary} ${(pin.features || []).join(" ")} ${pin.caution || ""}`.toLowerCase();
+  const fam = boardFamily(board);
+  const caps = classifyPlannerPin(pin, board);
+  const isGpio = !!pin.gpio && pin.gpio !== "N/A";
+  const outputCapable = isGpio && !caps.inputOnly && !caps.flash;
+  const has = (...kw: string[]) => kw.some((k) => text.includes(k));
+
+  // 5 V tolerant
+  if (/5\s*v|five ?volt/.test(q)) {
+    if (fam === "avr") return isGpio; // AVR runs at 5 V logic
+    if (fam === "stm32") return /5\s*v[- ]?tolerant/.test(text) && !/no 5\s*v|not 5\s*v|strictly 3\.3/.test(text);
+    return /5\s*v[- ]?tolerant/.test(text); // ESP32/ESP8266/RP2040 are 3.3 V only
+  }
+  if (q.includes("pwm")) {
+    if (has("pwm", "ledc")) return true;
+    if ((fam === "esp32" || fam === "esp8266" || fam === "rp2040") && outputCapable) return true;
+    return false;
+  }
+  if (q.includes("interrupt") || q === "int" || q.includes("irq")) {
+    if (has("interrupt", "int0", "int1", "irq")) return true;
+    if ((fam === "esp32" || fam === "esp8266" || fam === "rp2040") && isGpio) return true;
+    return false;
+  }
+  if (q.includes("touch")) return has("touch");
+  if (q.includes("dac")) return has("dac");
+  if (q.includes("adc") || q.includes("analog")) return has("adc", "analog", "dac");
+  if (q.includes("rtc") || q.includes("wake") || q.includes("wkup")) return has("rtc", "wake", "wkup");
+  if (q.includes("i2c") || q.includes("sda") || q.includes("scl")) return has("i2c", "sda", "scl");
+  if (q.includes("spi") || q.includes("mosi") || q.includes("miso") || q.includes("sck")) return has("spi", "mosi", "miso", "sck", "_cs", " ss");
+  if (q.includes("uart") || q.includes("serial") || q === "tx" || q === "rx") return has("uart", "serial", "tx", "rx", "txd", "rxd");
+  if (q.includes("input only") || q.includes("input-only")) return caps.inputOnly;
+  if (q.includes("strap") || q.includes("boot")) return caps.strapping;
+  if (q.includes("flash")) return caps.flash;
+
+  // free-text fallback: match anywhere in the pin's metadata
+  return text.includes(q);
+}
+
 export default function App() {
   const [selectedBoardId, setSelectedBoardId] = useState<string>("esp32-30pin");
   const [customBoard, setCustomBoard] = useState<MicrocontrollerBoard | null>(null);
@@ -415,9 +987,23 @@ export default function App() {
   const [hoveredPinName, setHoveredPinName] = useState<string | null>(null);
   const [selectedPinName, setSelectedPinName] = useState<string | null>(null);
   const [pinFilter, setPinFilter] = useState<string>("all");
+  const [capQuery, setCapQuery] = useState<string>(""); // reverse pin search
 
   // History of online searches
   const [searchHistory, setSearchHistory] = useState<string[]>(["STM32 Blue Pill", "Raspberry Pi Pico", "ATtiny85"]);
+
+  // Sensor wiring helper state
+  const [wiringOpen, setWiringOpen] = useState<boolean>(false);
+  const [selectedSensor, setSelectedSensor] = useState<string>("vl53l1x");
+
+  // Board compare state
+  const [compareOpen, setCompareOpen] = useState<boolean>(false);
+  const [compareIds, setCompareIds] = useState<string[]>([]);
+
+  // Peripheral code generator state
+  const [codeGenOpen, setCodeGenOpen] = useState<boolean>(false);
+  const [codeBus, setCodeBus] = useState<Bus>("i2c");
+  const [codeCopied, setCodeCopied] = useState<boolean>(false);
 
   // Flash & Monitor (compile / upload / Web Serial) state
   const [flashOpen, setFlashOpen] = useState<boolean>(false);
@@ -834,6 +1420,8 @@ export default function App() {
 
   // Filters calculation
   const satisfiesFilter = (pin: BoardPin) => {
+    // Reverse search takes precedence: highlight pins matching the capability query.
+    if (capQuery.trim()) return pinMatchesCapability(pin, activeBoard, capQuery);
     if (pinFilter === "all") return true;
     if (pinFilter === "gpio") return pin.gpio && pin.gpio !== "N/A" && !pin.isCaution;
     if (pinFilter === "analog") {
@@ -910,6 +1498,39 @@ export default function App() {
       setTimeout(() => setPlanCopied(false), 1500);
     } catch {
       /* clipboard blocked - ignore */
+    }
+  };
+
+  // ---- Sensor wiring helper ----
+  const sensorDef = SENSORS.find((s) => s.id === selectedSensor) || SENSORS[0];
+  const wiring = useMemo(() => generateWiring(activeBoard, sensorDef), [activeBoard, sensorDef]);
+
+  // ---- Board compare ----
+  const compareBoards = useMemo(() => {
+    const list = [...preloadedBoards];
+    if (customBoard && !list.some((b) => b.id === customBoard.id)) list.push(customBoard);
+    return list;
+  }, [customBoard]);
+  useEffect(() => {
+    if (compareOpen && compareIds.length === 0) {
+      const ids = [activeBoard.id, ...preloadedBoards.map((b) => b.id).filter((id) => id !== activeBoard.id)];
+      setCompareIds([...new Set(ids)].slice(0, 3));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compareOpen]);
+
+  // ---- Peripheral code generator ----
+  const generated = useMemo(
+    () => generatePeripheralCode(activeBoard, codeBus),
+    [activeBoard, codeBus]
+  );
+  const copyCode = () => {
+    try {
+      navigator.clipboard.writeText(generated.code);
+      setCodeCopied(true);
+      setTimeout(() => setCodeCopied(false), 1500);
+    } catch {
+      /* clipboard blocked */
     }
   };
 
@@ -1065,7 +1686,7 @@ export default function App() {
         </div>
 
         {/* Global Realtime search */}
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-2 flex-wrap justify-end">
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -1103,6 +1724,48 @@ export default function App() {
                 {planResult.errors}
               </span>
             )}
+          </button>
+
+          {/* Code Gen toggle */}
+          <button
+            onClick={() => setCodeGenOpen((v) => !v)}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-all ${codeGenOpen
+                ? "bg-indigo-600 border-indigo-500 text-white"
+                : "bg-[#141416] border-[#2a2a2e] text-zinc-300 hover:text-white hover:border-zinc-600"
+              }`}
+            id="codegen-toggle"
+            title="Generate I2C / SPI / UART init code with this board's real pins"
+          >
+            <Code2 size={13} />
+            <span>Code Gen</span>
+          </button>
+
+          {/* Wiring helper toggle */}
+          <button
+            onClick={() => setWiringOpen((v) => !v)}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-all ${wiringOpen
+                ? "bg-rose-600 border-rose-500 text-white"
+                : "bg-[#141416] border-[#2a2a2e] text-zinc-300 hover:text-white hover:border-zinc-600"
+              }`}
+            id="wiring-toggle"
+            title="Wire a sensor/module to this board with a voltage-safety check"
+          >
+            <Cable size={13} />
+            <span>Wiring</span>
+          </button>
+
+          {/* Board compare toggle */}
+          <button
+            onClick={() => setCompareOpen((v) => !v)}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-all ${compareOpen
+                ? "bg-amber-600 border-amber-500 text-white"
+                : "bg-[#141416] border-[#2a2a2e] text-zinc-300 hover:text-white hover:border-zinc-600"
+              }`}
+            id="compare-toggle"
+            title="Compare boards side by side"
+          >
+            <GitCompare size={13} />
+            <span>Compare</span>
           </button>
 
           {/* Flash & Monitor toggle */}
@@ -1325,6 +1988,216 @@ export default function App() {
               >
                 <X size={14} />
               </button>
+            </div>
+          )}
+
+          {/* ===================== SENSOR WIRING HELPER PANEL ===================== */}
+          {wiringOpen && (
+            <div className="bg-[#0c0c0d] border border-[#241016] rounded-2xl p-4 space-y-3 shrink-0" id="wiring-helper">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Cable size={15} className="text-rose-400" />
+                  <h3 className="text-sm font-serif text-[#f5f5f0]">Wiring Helper</h3>
+                  <span className="text-[10px] font-mono text-zinc-500">→ {activeBoard.name}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <select
+                    value={selectedSensor}
+                    onChange={(e) => setSelectedSensor(e.target.value)}
+                    className="bg-[#141416] border border-[#222] rounded px-2 py-1 text-[11px] text-zinc-200 focus:outline-none focus:border-rose-600 max-w-[240px]"
+                  >
+                    {SENSORS.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}
+                      </option>
+                    ))}
+                  </select>
+                  <button onClick={() => setWiringOpen(false)} className="text-zinc-500 hover:text-white p-1" title="Close">
+                    <X size={14} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="text-[10px] font-mono text-zinc-500">
+                {sensorDef.iface} · supply {sensorDef.vcc} · module logic {sensorDef.logic === "either" ? "3.3 V & 5 V" : sensorDef.logic + " V"}
+              </div>
+
+              {/* Voltage / compatibility banners */}
+              <div className="space-y-1.5">
+                {wiring.issues.map((iss, i) => (
+                  <div
+                    key={i}
+                    className={`flex items-start gap-2 text-[11px] px-3 py-2 rounded-lg border ${iss.sev === "error"
+                        ? "bg-red-950/30 border-red-800/50 text-red-300"
+                        : iss.sev === "warn"
+                        ? "bg-amber-950/25 border-amber-800/50 text-amber-300"
+                        : "bg-emerald-950/25 border-emerald-800/50 text-emerald-300"
+                      }`}
+                  >
+                    {iss.sev === "error" ? <AlertOctagon size={13} className="mt-0.5 shrink-0" /> : iss.sev === "warn" ? <AlertTriangle size={13} className="mt-0.5 shrink-0" /> : <CheckCircle2 size={13} className="mt-0.5 shrink-0" />}
+                    <span>{iss.text}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Wiring table */}
+              <div className="rounded-lg border border-[#1a1a1c] overflow-hidden">
+                <div className="grid grid-cols-[1fr_auto_1fr] gap-0 text-[10px] font-mono uppercase tracking-wider text-zinc-500 bg-[#0a0a0b] px-3 py-1.5">
+                  <span>{sensorDef.name.split(" ")[0]} pin</span>
+                  <span className="px-2"> </span>
+                  <span>Board pin</span>
+                </div>
+                {wiring.rows.map((r, i) => (
+                  <div key={i} className="grid grid-cols-[1fr_auto_1fr] items-center px-3 py-1.5 text-[11px] border-t border-[#141416]">
+                    <span className="font-mono text-rose-200">{r.module}</span>
+                    <ArrowRight size={12} className="text-zinc-600 mx-2" />
+                    <span className="font-mono text-zinc-200">
+                      {r.board}
+                      {r.note && <span className="block text-[9px] text-zinc-500 normal-case">{r.note}</span>}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              {sensorDef.notes && sensorDef.notes.length > 0 && (
+                <ul className="space-y-1">
+                  {sensorDef.notes.map((n, i) => (
+                    <li key={i} className="text-[10px] text-zinc-400 leading-relaxed flex gap-1.5">
+                      <span className="text-rose-500/70">•</span>
+                      <span>{n}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <p className="text-[9px] text-zinc-600">Module specs vary by breakout vendor — confirm VCC and logic on your board's silkscreen/datasheet before powering up.</p>
+            </div>
+          )}
+
+          {/* ===================== BOARD COMPARE PANEL ===================== */}
+          {compareOpen && (
+            <div className="bg-[#0c0c0d] border border-[#241e10] rounded-2xl p-4 space-y-3 shrink-0" id="board-compare">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2">
+                  <GitCompare size={15} className="text-amber-400" />
+                  <h3 className="text-sm font-serif text-[#f5f5f0]">Compare Boards</h3>
+                </div>
+                <button onClick={() => setCompareOpen(false)} className="text-zinc-500 hover:text-white p-1" title="Close">
+                  <X size={14} />
+                </button>
+              </div>
+
+              {/* Board selector chips */}
+              <div className="flex flex-wrap gap-1.5">
+                {compareBoards.map((b) => {
+                  const on = compareIds.includes(b.id);
+                  return (
+                    <button
+                      key={b.id}
+                      onClick={() =>
+                        setCompareIds((prev) => (on ? prev.filter((x) => x !== b.id) : [...prev, b.id]))
+                      }
+                      className={`text-[10px] px-2 py-1 rounded border font-medium transition-colors ${on
+                          ? "bg-amber-600 border-amber-500 text-white"
+                          : "bg-[#141416] border-[#2a2a2e] text-zinc-400 hover:text-white"
+                        }`}
+                    >
+                      {b.name}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Comparison table */}
+              {(() => {
+                const cols = compareBoards.filter((b) => compareIds.includes(b.id));
+                if (cols.length === 0)
+                  return <p className="text-[11px] text-zinc-500">Pick at least one board above. Tip: search a chip (e.g. STM32F411) first and it becomes selectable here.</p>;
+                const rows: { label: string; get: (b: MicrocontrollerBoard) => string }[] = [
+                  { label: "Architecture", get: (b) => b.specs.architecture },
+                  { label: "Clock", get: (b) => b.specs.clockSpeed },
+                  { label: "Logic voltage", get: (b) => b.specs.operatingVoltage },
+                  { label: "Flash", get: (b) => b.specs.flashMemory },
+                  { label: "RAM", get: (b) => b.specs.ramSize },
+                  { label: "GPIO count", get: (b) => String(b.specs.gpioCount ?? "—") },
+                  { label: "ADC", get: (b) => b.specs.adcChannels || "—" },
+                  { label: "DAC", get: (b) => b.specs.dacChannels || "—" },
+                  { label: "Interfaces", get: (b) => b.specs.interfaces || "—" },
+                  { label: "Pins mapped", get: (b) => String(b.pins.length) },
+                ];
+                return (
+                  <div className="overflow-x-auto rounded-lg border border-[#1a1a1c]">
+                    <table className="w-full text-[11px] border-collapse">
+                      <thead>
+                        <tr className="bg-[#0a0a0b]">
+                          <th className="text-left font-mono uppercase tracking-wider text-zinc-500 text-[9px] px-3 py-2">Spec</th>
+                          {cols.map((b) => (
+                            <th key={b.id} className="text-left font-semibold text-amber-200 px-3 py-2 min-w-[140px]">
+                              {b.name}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rows.map((row) => (
+                          <tr key={row.label} className="border-t border-[#141416]">
+                            <td className="font-mono uppercase tracking-wider text-zinc-500 text-[9px] px-3 py-2 align-top">{row.label}</td>
+                            {cols.map((b) => (
+                              <td key={b.id} className="text-zinc-200 px-3 py-2 align-top">{row.get(b)}</td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+
+          {/* ===================== PERIPHERAL CODE GEN PANEL ===================== */}
+          {codeGenOpen && (
+            <div className="bg-[#0c0c0d] border border-[#1a1830] rounded-2xl p-4 space-y-3 shrink-0" id="code-gen">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Code2 size={15} className="text-indigo-400" />
+                  <h3 className="text-sm font-serif text-[#f5f5f0]">Peripheral Code</h3>
+                  <span className="text-[10px] font-mono text-zinc-500">· {activeBoard.name} · {generated.framework}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={copyCode}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-mono border bg-[#141416] border-[#2a2a2e] text-zinc-300 hover:text-white transition-colors"
+                  >
+                    {codeCopied ? <ClipboardCheck size={11} className="text-emerald-400" /> : <Copy size={11} />}
+                    {codeCopied ? "Copied" : "Copy"}
+                  </button>
+                  <button onClick={() => setCodeGenOpen(false)} className="text-zinc-500 hover:text-white p-1" title="Close">
+                    <X size={14} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-1">
+                {([["i2c", "I²C"], ["spi", "SPI"], ["uart", "UART"]] as [Bus, string][]).map(([id, label]) => (
+                  <button
+                    key={id}
+                    onClick={() => setCodeBus(id)}
+                    className={`px-3 py-1 rounded text-[11px] font-semibold border transition-colors ${codeBus === id
+                        ? "bg-indigo-600 border-indigo-500 text-white"
+                        : "bg-[#141416] border-[#2a2a2e] text-zinc-400 hover:text-white"
+                      }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              <pre className="text-[10.5px] font-mono whitespace-pre overflow-x-auto max-h-80 overflow-y-auto p-3 rounded-lg border border-[#222] bg-black text-zinc-200 leading-relaxed">
+                {generated.code}
+              </pre>
+              <p className="text-[9px] text-zinc-600">
+                Pins are read from this board's default bus mapping. Always sanity-check against the datasheet before wiring.
+              </p>
             </div>
           )}
 
@@ -1712,8 +2585,11 @@ export default function App() {
                 ].map((item) => (
                   <button
                     key={item.id}
-                    onClick={() => setPinFilter(item.id)}
-                    className={`text-[10px] px-2.5 py-1 rounded transition-all border font-medium ${pinFilter === item.id
+                    onClick={() => {
+                      setPinFilter(item.id);
+                      setCapQuery("");
+                    }}
+                    className={`text-[10px] px-2.5 py-1 rounded transition-all border font-medium ${!capQuery && pinFilter === item.id
                         ? `${item.color.replace('bg-opacity-10', 'bg-opacity-30')} scale-[1.02] border font-semibold outline-none ring-1 ring-zinc-700`
                         : "bg-[#141416] border-transparent text-zinc-400 hover:text-white"
                       }`}
@@ -1729,6 +2605,64 @@ export default function App() {
               Matching signals: {activeBoard.pins.filter(satisfiesFilter).length}
             </div>
           </div>
+
+          {/* Reverse pin search — find pins by capability */}
+          <div className="flex flex-wrap items-center gap-2 bg-[#0c0c0d]/60 border border-[#1a1a1c] px-4 py-2.5 rounded-xl" id="reverse-pin-search">
+            <div className="relative">
+              <Search size={12} className="absolute left-2.5 top-2.5 text-zinc-500" />
+              <input
+                value={capQuery}
+                onChange={(e) => setCapQuery(e.target.value)}
+                placeholder="Find pins by capability… pwm, 5V, interrupt, touch, dac, adc, i2c, spi, uart"
+                className="bg-[#141416] border border-[#222] rounded-full pl-8 pr-7 py-1.5 w-[24rem] max-w-full text-[11px] text-zinc-200 placeholder-zinc-600 focus:outline-none focus:border-indigo-600"
+                id="reverse-search-input"
+              />
+              {capQuery && (
+                <button onClick={() => setCapQuery("")} className="absolute right-2 top-2 text-zinc-500 hover:text-white" title="Clear">
+                  <X size={12} />
+                </button>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-1">
+              {["PWM", "Interrupt", "5V tolerant", "ADC", "DAC", "Touch"].map((c) => (
+                <button
+                  key={c}
+                  onClick={() => setCapQuery(capQuery.toLowerCase() === c.toLowerCase() ? "" : c.toLowerCase())}
+                  className={`text-[10px] px-2 py-1 rounded border font-medium transition-colors ${capQuery.toLowerCase() === c.toLowerCase()
+                      ? "bg-indigo-600 border-indigo-500 text-white"
+                      : "bg-[#141416] border-[#2a2a2e] text-zinc-400 hover:text-white"
+                    }`}
+                >
+                  {c}
+                </button>
+              ))}
+            </div>
+            {capQuery.trim() && (
+              <span className="ml-auto text-[10px] font-mono text-indigo-300">
+                {activeBoard.pins.filter(satisfiesFilter).length} match
+              </span>
+            )}
+          </div>
+
+          {/* Matched-pin list for the reverse search */}
+          {capQuery.trim() && (
+            <div className="flex flex-wrap gap-1.5">
+              {activeBoard.pins.filter(satisfiesFilter).map((p) => (
+                <span
+                  key={p.number}
+                  className="text-[10px] font-mono px-2 py-0.5 rounded bg-indigo-950/30 border border-indigo-800/40 text-indigo-200"
+                >
+                  {p.name}
+                  <span className="text-indigo-400/60"> · {p.primary}</span>
+                </span>
+              ))}
+              {activeBoard.pins.filter(satisfiesFilter).length === 0 && (
+                <span className="text-[10px] text-zinc-500">
+                  No pins match “{capQuery}”. Try: pwm, 5V, interrupt, adc, dac, touch, rtc, i2c, spi, uart.
+                </span>
+              )}
+            </div>
+          )}
 
           {/* Loading status overlay screen for search */}
           {isSearching && (
