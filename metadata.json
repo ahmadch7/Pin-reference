@@ -1,0 +1,6 @@
+{
+  "name": "Microcontroller Pinout & Datasheet Companion",
+  "description": "Interactive real-time pinout visualizer and datasheet search tool for ESP32, Arduino boards, and generic microcontrollers with dynamic AI specs extraction.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
