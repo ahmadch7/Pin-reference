@@ -38,6 +38,16 @@ and shows its pinout automatically.
   3.3 V / 5 V level-compatibility check.
 - **Board compare** — line up boards side by side (specs, voltages, pin counts) to
   pick the right one for a project.
+- **Serial plotter** — graph incoming serial data in real time (Arduino Serial Plotter
+  format: space/comma values or `label:value`), auto-scaling, multi-series.
+- **Sanity Check** — 1-click guided diagnostics: flash a tiny test firmware that blinks
+  the LED and scans the I²C bus, then names the devices it finds.
+- **Component snapping** — drag a part (servo, HC-SR04, I²C LCD, NeoPixel, sensors…)
+  onto the board and the exact pins it connects to light up, with a voltage check.
+- **Error decoder** — translates cryptic flash/bootloader errors (esptool, avrdude)
+  into plain-language fixes ("hold the BOOT button and try again").
+- **Installable PWA** — runs offline. Flashing, pin reference, and serial all work with
+  no internet, since they run locally through the browser and `arduino-cli`.
 - **Dynamic catalog** — search any other chip and a pinout is generated on demand via
   the Gemini API.
 

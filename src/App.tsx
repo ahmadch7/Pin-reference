@@ -33,8 +33,30 @@ import {
   Code2,
   Copy,
   Cable,
-  GitCompare
+  GitCompare,
+  Stethoscope,
+  Lightbulb
 } from "lucide-react";
+
+// Best-effort guesses for common I2C addresses, shown in the Sanity Check.
+const I2C_GUESS: Record<string, string> = {
+  "0x0D": "QMC5883L magnetometer",
+  "0x1E": "HMC5883L magnetometer",
+  "0x27": "PCF8574 LCD backpack",
+  "0x29": "VL53L0X / VL53L1X ToF",
+  "0x3C": "SSD1306 OLED",
+  "0x3D": "SSD1306 OLED",
+  "0x3F": "PCF8574 LCD backpack",
+  "0x40": "INA219 / PCA9685",
+  "0x48": "ADS1115 / LM75",
+  "0x4A": "ADS1115",
+  "0x53": "ADXL345 accelerometer",
+  "0x5A": "MLX90614 / MPR121",
+  "0x68": "MPU6050 / DS3231 / DS1307",
+  "0x69": "MPU6050 (AD0=1)",
+  "0x76": "BME280 / BMP280",
+  "0x77": "BME280 / BMP280",
+};
 import { preloadedBoards } from "./data/preloadedBoards";
 import { MicrocontrollerBoard, BoardPin } from "./types";
 
@@ -667,7 +689,7 @@ interface SensorPin {
 interface SensorDef {
   id: string;
   name: string;
-  iface: "I²C" | "SPI" | "UART" | "Analog" | "1-Wire";
+  iface: "I²C" | "SPI" | "UART" | "Analog" | "1-Wire" | "PWM" | "Digital";
   vcc: string; // human-readable supply spec
   rail: "3.3" | "5" | "either"; // which board rail to power it from
   logic: "3.3" | "5" | "either"; // module's I/O logic level
@@ -848,7 +870,100 @@ const SENSORS: SensorDef[] = [
     ],
     notes: ["Modules with a regulator + level shifter take 5 V. A bare card holder is 3.3 V only — never feed a raw card 5 V."],
   },
+  {
+    id: "servo",
+    name: "Servo (SG90 / MG90S)",
+    iface: "PWM",
+    vcc: "4.8–6 V",
+    rail: "5",
+    logic: "either",
+    pins: [
+      { sig: "Signal (orange)", role: "gpio", note: "any PWM-capable GPIO" },
+      { sig: "V+ (red)", role: "vcc", note: "5 V — NOT the 3.3 V pin" },
+      { sig: "GND (brown)", role: "gnd" },
+    ],
+    notes: [
+      "Servos pull current spikes — power from 5 V, and for anything bigger than an SG90 use a separate 5 V supply with a common ground.",
+      "The 3.3 V signal from an ESP32 drives most hobby servos fine.",
+    ],
+  },
+  {
+    id: "i2clcd",
+    name: "I²C LCD 1602 (PCF8574)",
+    iface: "I²C",
+    vcc: "5 V",
+    rail: "5",
+    logic: "either",
+    pins: [
+      { sig: "VCC", role: "vcc", note: "5 V for proper contrast/backlight" },
+      { sig: "GND", role: "gnd" },
+      { sig: "SDA", role: "sda" },
+      { sig: "SCL", role: "scl" },
+    ],
+    notes: ["Address usually 0x27 or 0x3F. The display needs 5 V; on a 3.3 V board the I²C lines still work but power VCC from 5 V."],
+  },
+  {
+    id: "button",
+    name: "Push button",
+    iface: "Digital",
+    vcc: "—",
+    rail: "either",
+    logic: "either",
+    pins: [
+      { sig: "Leg A", role: "gpio", note: "to a GPIO; use pinMode(pin, INPUT_PULLUP)" },
+      { sig: "Leg B", role: "gnd" },
+    ],
+    notes: ["With INPUT_PULLUP, pressed reads LOW and you need no external resistor."],
+  },
+  {
+    id: "pot",
+    name: "Potentiometer",
+    iface: "Analog",
+    vcc: "—",
+    rail: "either",
+    logic: "either",
+    pins: [
+      { sig: "End 1", role: "vcc", note: "power rail (3.3 V on a 3.3 V board)" },
+      { sig: "Wiper (middle)", role: "adc" },
+      { sig: "End 2", role: "gnd" },
+    ],
+    notes: ["Power the outer pins from the board's logic rail so the wiper never exceeds the ADC's max (3.3 V on ESP32)."],
+  },
+  {
+    id: "relay",
+    name: "Relay module (1-ch)",
+    iface: "Digital",
+    vcc: "5 V (coil)",
+    rail: "5",
+    logic: "either",
+    pins: [
+      { sig: "IN", role: "gpio" },
+      { sig: "VCC", role: "vcc", note: "5 V for the coil" },
+      { sig: "GND", role: "gnd" },
+    ],
+    notes: ["Most modules are active-LOW (IN low = relay on). Coil needs ~5 V; an opto-isolated module is safer for the MCU."],
+  },
+  {
+    id: "neopixel",
+    name: "WS2812 NeoPixel",
+    iface: "Digital",
+    vcc: "5 V",
+    rail: "5",
+    logic: "5",
+    pins: [
+      { sig: "DIN", role: "gpio", note: "data in — first pixel" },
+      { sig: "5V", role: "vcc" },
+      { sig: "GND", role: "gnd" },
+    ],
+    notes: [
+      "Data is 5 V logic. From a 3.3 V board add a level shifter (or a ~330 Ω series resistor and keep the lead short) for reliable colour.",
+      "Big strips need an external 5 V supply with the ground tied to the board.",
+    ],
+  },
 ];
+
+// Colours used to tag attached components on the board map.
+const COMPONENT_COLORS = ["#22d3ee", "#f472b6", "#a3e635", "#fbbf24", "#c084fc", "#fb7185"];
 
 function parseBoardLogic(board: MicrocontrollerBoard): "3.3" | "5" {
   return /5\s*v\s*logic|^5\.0|^5v/i.test(board.specs?.operatingVoltage || "") ? "5" : "3.3";
@@ -973,6 +1088,189 @@ function pinMatchesCapability(pin: BoardPin, board: MicrocontrollerBoard, queryR
   return text.includes(q);
 }
 
+// ============================================================================
+//  SERIAL PLOTTER  —  real-time graph of incoming serial data (canvas, no deps)
+// ============================================================================
+const PLOT_COLORS = ["#34d399", "#60a5fa", "#f59e0b", "#f472b6", "#a78bfa", "#f87171", "#22d3ee", "#a3e635"];
+const PLOT_MAX_SAMPLES = 300;
+
+// Parse one serial line into numbers. Supports "512", "1 2 3", "1,2,3",
+// and labelled "x:1.2 y:3.4" / "ax=0.1,ay=0.2".
+function parsePlotLine(line: string): { values: number[]; labels: string[] } {
+  const parts = line.split(/[\s,;\t]+/).filter(Boolean);
+  const values: number[] = [];
+  const labels: string[] = [];
+  for (const p of parts) {
+    const m = p.match(/^([A-Za-z_][\w]*)[:=](-?\d*\.?\d+)$/);
+    if (m) {
+      labels.push(m[1]);
+      values.push(parseFloat(m[2]));
+    } else {
+      const n = parseFloat(p);
+      if (!isNaN(n) && /^-?\d*\.?\d+$/.test(p)) values.push(n);
+    }
+  }
+  return { values, labels };
+}
+
+function drawSerialPlot(canvas: HTMLCanvasElement, data: number[][]) {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || 600;
+  const h = canvas.clientHeight || 200;
+  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+
+  // y-range across all visible samples & series
+  let mn = Infinity;
+  let mx = -Infinity;
+  for (const s of data) for (const v of s) {
+    if (v < mn) mn = v;
+    if (v > mx) mx = v;
+  }
+  if (!isFinite(mn) || !isFinite(mx)) {
+    mn = 0;
+    mx = 1;
+  }
+  if (mn === mx) {
+    mn -= 1;
+    mx += 1;
+  }
+  const pad = (mx - mn) * 0.1;
+  mn -= pad;
+  mx += pad;
+
+  // grid + min/mid/max labels
+  ctx.strokeStyle = "rgba(255,255,255,0.06)";
+  ctx.fillStyle = "rgba(255,255,255,0.35)";
+  ctx.font = "9px monospace";
+  ctx.lineWidth = 1;
+  for (let g = 0; g <= 4; g++) {
+    const y = (g / 4) * h;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+    const val = mx - (g / 4) * (mx - mn);
+    ctx.fillText(val.toFixed(1), 2, Math.min(h - 2, Math.max(9, y + 9)));
+  }
+
+  if (data.length < 2) return;
+  const X = (i: number) => (i / (data.length - 1)) * w;
+  const Y = (v: number) => h - ((v - mn) / (mx - mn)) * h;
+  const series = Math.max(...data.map((s) => s.length));
+  for (let s = 0; s < series; s++) {
+    ctx.beginPath();
+    ctx.strokeStyle = PLOT_COLORS[s % PLOT_COLORS.length];
+    ctx.lineWidth = 1.5;
+    let started = false;
+    for (let i = 0; i < data.length; i++) {
+      const sample = data[i];
+      if (s >= sample.length) continue;
+      const x = X(i);
+      const y = Y(sample[s]);
+      if (!started) {
+        ctx.moveTo(x, y);
+        started = true;
+      } else {
+        ctx.lineTo(x, y);
+      }
+    }
+    ctx.stroke();
+  }
+}
+
+// ============================================================================
+//  FLASH ERROR DECODER  —  turn cryptic esptool/avrdude logs into plain English
+// ============================================================================
+interface DecodedError {
+  title: string;
+  meaning: string;
+  fix: string;
+  severity: "error" | "warn";
+}
+const FLASH_ERROR_RULES: { test: RegExp; title: string; meaning: string; fix: string; severity?: "error" | "warn" }[] = [
+  {
+    test: /Timed out waiting for packet header|Failed to connect to ESP32|Wrong boot mode detected|No serial data received|Invalid head of packet/i,
+    title: "ESP32 won't enter flash mode",
+    meaning: "The chip never dropped into its bootloader, so the uploader couldn't talk to it.",
+    fix: "Hold the BOOT button on the board, tap EN/RST once, then keep BOOT held until you see 'Connecting…', and release. Most boards auto-enter; if yours doesn't, this manual BOOT-hold fixes it. Also confirm the right COM port.",
+  },
+  {
+    test: /espcomm_open failed|espcomm_upload_mem failed|warning: espcomm/i,
+    title: "ESP8266 won't enter flash mode",
+    meaning: "The NodeMCU/ESP8266 didn't enter its bootloader.",
+    fix: "Try another USB cable/port and the correct board. If it persists, hold FLASH and tap RST, then release. Install the CH340/CP2102 driver if the port is missing.",
+  },
+  {
+    test: /could not open port|Access is denied|Serial port.*busy|port is busy|Resource busy|the port.*in use|Inappropriate ioctl/i,
+    title: "COM port is busy / locked",
+    meaning: "Another program is holding the serial port, so the uploader can't open it.",
+    fix: "Close the Serial Monitor here AND in the Arduino IDE — only one app can own a COM port. Close any other terminal too, then retry.",
+  },
+  {
+    test: /can't open device|ser_open|Error opening serial port|opening serial port:.*No such file|could not find a board on the selected port|cannot find the port|Port\s+\S+\s+not found|No device found on/i,
+    title: "Wrong or missing COM port",
+    meaning: "The selected COM port doesn't exist, or nothing is on it.",
+    fix: "Replug the board and check it's detected (USB Board Detect panel). Pick the right port. If no port shows up at all, install the USB-serial driver — CP2102 or CH340 — for your board.",
+  },
+  {
+    test: /stk500_recv|stk500_getsync|programmer is not responding|not in sync|resp=0x00/i,
+    title: "Arduino (AVR) not responding",
+    meaning: "avrdude couldn't sync with the bootloader.",
+    fix: "Check the board type and port are correct. Unplug anything wired to D0/D1 (RX/TX) during upload, try another cable/port, and press RESET right as the upload starts.",
+  },
+  {
+    test: /Platform .* not installed|core, which is not installed|Unknown FQBN|platform not installed/i,
+    title: "Board core not installed",
+    meaning: "The board's support package isn't installed for the command-line tool.",
+    fix: "Open Arduino IDE → Boards Manager and install the matching core (e.g. 'esp32 by Espressif' or 'Arduino AVR Boards'). This tool shares the IDE's cores.",
+  },
+  {
+    test: /fatal error:\s*\S+\.h: No such file|No such file or directory\s*#include/i,
+    title: "Missing library",
+    meaning: "An #include points to a library that isn't installed.",
+    fix: "Install it via Arduino IDE → Library Manager (the .h filename in the error tells you which), then recompile.",
+  },
+  {
+    test: /text section exceeds|region\s+\S+\s+overflowed|sketch too big|program storage space.*exceed|not enough room|does not fit in region|DRAM segment/i,
+    title: "Sketch too big for the chip",
+    meaning: "The compiled program (or its RAM usage) exceeds what the board has.",
+    fix: "Trim the sketch, choose a bigger partition scheme (ESP32: Tools → Partition Scheme), or move to a board with more flash/RAM.",
+  },
+  {
+    test: /No DFU capable USB device|dfu-util:.*Cannot open|No DFU/i,
+    title: "STM32 not in DFU mode",
+    meaning: "The board isn't presenting a USB DFU device to flash over USB.",
+    fix: "Set BOOT0 high and reset to enter the system bootloader (DFU), or flash via an ST-Link instead.",
+  },
+  {
+    test: /was not declared in this scope|expected\s+.*\s+before|error:.*\.(ino|cpp|h):\d+|Compilation error/i,
+    title: "Code compile error — not a hardware problem",
+    meaning: "The sketch didn't compile, so nothing was sent to the board. The hardware is fine.",
+    fix: "Find the first 'error:' line in the log above — it names the file and line number. Fix that spot and recompile.",
+    severity: "warn",
+  },
+];
+
+function decodeFlashErrors(output: string): DecodedError[] {
+  if (!output) return [];
+  const out: DecodedError[] = [];
+  const seen = new Set<string>();
+  for (const r of FLASH_ERROR_RULES) {
+    if (r.test.test(output) && !seen.has(r.title)) {
+      seen.add(r.title);
+      out.push({ title: r.title, meaning: r.meaning, fix: r.fix, severity: r.severity || "error" });
+    }
+  }
+  return out;
+}
+
 export default function App() {
   const [selectedBoardId, setSelectedBoardId] = useState<string>("esp32-30pin");
   const [customBoard, setCustomBoard] = useState<MicrocontrollerBoard | null>(null);
@@ -992,9 +1290,22 @@ export default function App() {
   // History of online searches
   const [searchHistory, setSearchHistory] = useState<string[]>(["STM32 Blue Pill", "Raspberry Pi Pico", "ATtiny85"]);
 
+  // Sanity Check / guided diagnostics state
+  const [diagOpen, setDiagOpen] = useState<boolean>(false);
+  const [diagBusy, setDiagBusy] = useState<boolean>(false);
+  const [diagOutput, setDiagOutput] = useState<string>("");
+  const [diagOk, setDiagOk] = useState<boolean | null>(null);
+  const [diagFlashed, setDiagFlashed] = useState<boolean>(false);
+  const [diagDevices, setDiagDevices] = useState<string[]>([]);
+  const diagFoundRef = useRef<Set<string>>(new Set());
+
   // Sensor wiring helper state
   const [wiringOpen, setWiringOpen] = useState<boolean>(false);
   const [selectedSensor, setSelectedSensor] = useState<string>("vl53l1x");
+
+  // Interactive component snapping (drag a component onto the board)
+  const [attachedComponents, setAttachedComponents] = useState<string[]>([]);
+  const [dragOverBoard, setDragOverBoard] = useState<boolean>(false);
 
   // Board compare state
   const [compareOpen, setCompareOpen] = useState<boolean>(false);
@@ -1020,6 +1331,16 @@ export default function App() {
   const serialReaderRef = useRef<any>(null);
   const serialKeepRef = useRef<boolean>(false);
   const consoleRef = useRef<HTMLPreElement | null>(null);
+
+  // Serial plotter
+  const [serialView, setSerialView] = useState<"monitor" | "plotter">("monitor");
+  const [plotPaused, setPlotPaused] = useState<boolean>(false);
+  const [plotLegend, setPlotLegend] = useState<{ labels: string[]; values: number[] }>({ labels: [], values: [] });
+  const lineBufRef = useRef<string>("");
+  const plotDataRef = useRef<number[][]>([]);
+  const plotLabelsRef = useRef<string[]>([]);
+  const plotPausedRef = useRef<boolean>(false);
+  const plotCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Pin Planner state
   const [plannerOpen, setPlannerOpen] = useState<boolean>(false);
@@ -1048,6 +1369,7 @@ export default function App() {
     setHoveredPinName(null);
     setSelectedPinName(null);
     setAssignments([]); // a plan is board-specific; pins differ between boards
+    setAttachedComponents([]); // wiring is board-specific too
   }, [selectedBoardId]);
 
   // Poll the backend for the board currently plugged into USB. We chain with
@@ -1350,6 +1672,10 @@ export default function App() {
     // Pin Planner overlay: when planning, assigned pins take a distinct colour
     // (red = conflict, amber = caution, orange = assigned-OK) so the board map
     // doubles as a live wiring diagram.
+    // Attached-component snapping highlights the exact pins a component uses.
+    if (attachedComponents.length && wirePins[pin.name]) {
+      return { bg: "bg-cyan-500/30 border-2 border-cyan-400", text: "text-cyan-100", indicator: "bg-cyan-400", border: "border-cyan-400" };
+    }
     if (plannerOpen && planByPin[pin.name]) {
       const sev = planByPin[pin.name];
       if (sev === "error")
@@ -1463,6 +1789,29 @@ export default function App() {
     (activeBoard.id || "").toLowerCase().includes("esp32") ||
     activeBoard.specs.architecture.toLowerCase().includes("xtensa");
 
+  // ---- Interactive component snapping ----
+  const attachedList = attachedComponents
+    .map((id) => SENSORS.find((s) => s.id === id))
+    .filter((s): s is SensorDef => !!s);
+  const attachedWiring = attachedList.map((comp, idx) => ({
+    comp,
+    color: COMPONENT_COLORS[idx % COMPONENT_COLORS.length],
+    ...generateWiring(activeBoard, comp),
+  }));
+  // pinName -> list of "Component pin" labels, for the board-map highlight.
+  const wirePins: Record<string, string[]> = {};
+  for (const aw of attachedWiring) {
+    for (const row of aw.rows) {
+      const pin = activeBoard.pins.find((p) => p.name === row.board);
+      if (!pin) continue; // skip "any free GPIO" etc. — not a specific pin
+      (wirePins[pin.name] = wirePins[pin.name] || []).push(`${aw.comp.name.split(" ")[0]} ${row.module}`);
+    }
+  }
+  const attachComponent = (id: string) =>
+    setAttachedComponents((prev) => (prev.includes(id) ? prev : [...prev, id]));
+  const detachComponent = (id: string) =>
+    setAttachedComponents((prev) => prev.filter((x) => x !== id));
+
   const addAssignment = (roleId: string, pinName = "") =>
     setAssignments((prev) => [...prev, { id: `a${planIdRef.current++}`, roleId, pinName }]);
   const updateAssignment = (id: string, patch: Partial<PinAssignment>) =>
@@ -1554,6 +1903,35 @@ export default function App() {
     if (consoleRef.current) consoleRef.current.scrollTop = consoleRef.current.scrollHeight;
   }, [serialLines]);
 
+  useEffect(() => {
+    plotPausedRef.current = plotPaused;
+  }, [plotPaused]);
+
+  // Real-time plot draw loop + legend updater, running only while the plotter is shown.
+  useEffect(() => {
+    if (serialView !== "plotter") return;
+    let raf = 0;
+    const loop = () => {
+      if (plotCanvasRef.current) drawSerialPlot(plotCanvasRef.current, plotDataRef.current);
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    const legendTimer = setInterval(() => {
+      const data = plotDataRef.current;
+      const last = data[data.length - 1] || [];
+      const n = data.reduce((m, s) => Math.max(m, s.length), 0);
+      const labels =
+        plotLabelsRef.current.length === n && n > 0
+          ? plotLabelsRef.current
+          : Array.from({ length: n }, (_, i) => `S${i + 1}`);
+      setPlotLegend({ labels, values: last });
+    }, 200);
+    return () => {
+      cancelAnimationFrame(raf);
+      clearInterval(legendTimer);
+    };
+  }, [serialView]);
+
   const disconnectSerial = async () => {
     serialKeepRef.current = false;
     try {
@@ -1600,6 +1978,68 @@ export default function App() {
     }
   };
 
+  // Sanity Check: flash the diagnostic firmware to the connected board.
+  const runSanityCheck = async () => {
+    setDiagBusy(true);
+    setDiagOk(null);
+    setDiagFlashed(false);
+    setDiagDevices([]);
+    diagFoundRef.current = new Set();
+    setDiagOutput("Flashing diagnostic firmware… (first build of a core can take a minute)");
+    if (serialConnected) await disconnectSerial(); // free the port for arduino-cli
+    try {
+      const body = {
+        fqbn: arduinoStatus?.board?.fqbn || undefined,
+        port: arduinoStatus?.board?.port || undefined,
+      };
+      const r = await fetch("/api/arduino/diagnostic", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const d = await r.json();
+      setDiagOk(!!d.success);
+      setDiagOutput(d.output || (d.success ? "Flashed." : "Failed."));
+      if (d.success) setDiagFlashed(true);
+    } catch (e: any) {
+      setDiagOk(false);
+      setDiagOutput("Request failed: " + (e?.message || e));
+    } finally {
+      setDiagBusy(false);
+    }
+  };
+
+  // Connect serial to read the diagnostic's output (LED blink + I2C scan).
+  const connectAndRead = async () => {
+    diagFoundRef.current = new Set();
+    setDiagDevices([]);
+    await connectSerial();
+  };
+
+  // Translate cryptic flash/bootloader output into plain-language fixes.
+  const renderDecoded = (output: string) => {
+    const list = decodeFlashErrors(output);
+    if (!list.length) return null;
+    return (
+      <div className="space-y-1.5">
+        {list.map((d, i) => (
+          <div
+            key={i}
+            className={`rounded-lg border px-3 py-2 ${d.severity === "warn" ? "bg-amber-950/20 border-amber-800/50" : "bg-orange-950/25 border-orange-700/50"}`}
+          >
+            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-orange-200">
+              <Lightbulb size={12} className="text-orange-400 shrink-0" /> {d.title}
+            </div>
+            <p className="text-[10px] text-zinc-400 mt-0.5 leading-relaxed">{d.meaning}</p>
+            <p className="text-[10px] text-emerald-300/90 mt-1 leading-relaxed">
+              <span className="font-semibold">Fix:</span> {d.fix}
+            </p>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
   const readSerialLoop = async () => {
     const port = serialPortRef.current;
     if (!port?.readable) return;
@@ -1614,6 +2054,33 @@ export default function App() {
           if (value) {
             const chunk = decoder.decode(value);
             setSerialLines((s) => (s + chunk).slice(-12000)); // cap buffer
+            // Split into complete lines; feed both the plotter and the
+            // Sanity-Check I2C parser.
+            lineBufRef.current += chunk;
+            let nl: number;
+            while ((nl = lineBufRef.current.indexOf("\n")) >= 0) {
+              const line = lineBufRef.current.slice(0, nl).trim();
+              lineBufRef.current = lineBufRef.current.slice(nl + 1);
+              if (!line) continue;
+
+              // Plotter
+              if (!plotPausedRef.current) {
+                const { values, labels } = parsePlotLine(line);
+                if (values.length > 0) {
+                  plotDataRef.current.push(values);
+                  if (plotDataRef.current.length > PLOT_MAX_SAMPLES) plotDataRef.current.shift();
+                  if (labels.length) plotLabelsRef.current = labels;
+                }
+              }
+
+              // Sanity Check: collect I2C addresses, commit each completed scan.
+              const fm = line.match(/^FOUND\s+0x([0-9a-fA-F]+)/i);
+              if (fm) {
+                diagFoundRef.current.add("0x" + fm[1].toUpperCase().padStart(2, "0"));
+              } else if (/I2C-SCAN-END/.test(line)) {
+                setDiagDevices([...diagFoundRef.current].sort());
+              }
+            }
           }
         }
       } catch {
@@ -1768,6 +2235,20 @@ export default function App() {
             <span>Compare</span>
           </button>
 
+          {/* Sanity Check toggle */}
+          <button
+            onClick={() => setDiagOpen((v) => !v)}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-all ${diagOpen
+                ? "bg-teal-600 border-teal-500 text-white"
+                : "bg-[#141416] border-[#2a2a2e] text-zinc-300 hover:text-white hover:border-zinc-600"
+              }`}
+            id="diagnose-toggle"
+            title="1-click hardware test: blink the LED and scan the I2C bus"
+          >
+            <Stethoscope size={13} />
+            <span>Sanity Check</span>
+          </button>
+
           {/* Flash & Monitor toggle */}
           <button
             onClick={() => setFlashOpen((v) => !v)}
@@ -1890,6 +2371,34 @@ export default function App() {
               </ul>
             </div>
 
+            {/* Draggable component palette */}
+            <div id="component-palette">
+              <p className="text-[10px] uppercase tracking-[0.2em] font-mono text-zinc-500 mb-3 font-semibold">Drag a Component → Board</p>
+              <div className="flex flex-wrap gap-1.5">
+                {["servo", "hcsr04", "i2clcd", "button", "pot", "relay", "neopixel", "vl53l1x", "mpu6050", "ssd1306", "ds18b20", "nrf24l01"].map((id) => {
+                  const c = SENSORS.find((s) => s.id === id);
+                  if (!c) return null;
+                  const on = attachedComponents.includes(id);
+                  return (
+                    <div
+                      key={id}
+                      draggable
+                      onDragStart={(e) => {
+                        e.dataTransfer.setData("text/component", id);
+                        e.dataTransfer.effectAllowed = "copy";
+                      }}
+                      onClick={() => attachComponent(id)}
+                      title={`${c.name} — drag onto the board (or click) to highlight its pins`}
+                      className={`cursor-grab active:cursor-grabbing select-none text-[10px] px-2 py-1 rounded border font-medium transition-colors ${on ? "bg-cyan-600 border-cyan-500 text-white" : "bg-[#141416] border-[#2a2a2e] text-zinc-300 hover:text-white hover:border-cyan-700"}`}
+                    >
+                      {c.name.split(" (")[0]}
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="text-[9px] text-zinc-600 mt-2 leading-relaxed">Drop one on the board to light up the exact pins it connects to.</p>
+            </div>
+
             {/* Custom Search list */}
             <div>
               <div className="flex items-center justify-between mb-3">
@@ -1988,6 +2497,108 @@ export default function App() {
               >
                 <X size={14} />
               </button>
+            </div>
+          )}
+
+          {/* ===================== SANITY CHECK PANEL ===================== */}
+          {diagOpen && (
+            <div className="bg-[#0c0c0d] border border-[#0e2420] rounded-2xl p-4 space-y-3 shrink-0" id="sanity-check">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Stethoscope size={15} className="text-teal-400" />
+                  <h3 className="text-sm font-serif text-[#f5f5f0]">Sanity Check</h3>
+                  <span className="text-[10px] font-mono text-zinc-500">
+                    {arduinoStatus?.board ? `${arduinoStatus.board.name}${arduinoStatus.board.port ? " · " + arduinoStatus.board.port : ""}` : "no board on USB"}
+                  </span>
+                </div>
+                <button onClick={() => setDiagOpen(false)} className="text-zinc-500 hover:text-white p-1" title="Close">
+                  <X size={14} />
+                </button>
+              </div>
+
+              <p className="text-[11px] text-zinc-400 leading-relaxed">
+                Not sure if it's your code, a dead board, or a bad wire? This flashes a tiny test firmware that blinks the
+                onboard LED and scans the I²C bus, so you can see what the board actually sees.
+              </p>
+              <div className="flex items-start gap-1.5 text-[10px] text-amber-300/90 bg-amber-950/20 border border-amber-800/40 rounded-lg px-3 py-2">
+                <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+                <span>This overwrites the program currently on the board with the test firmware. Re-upload your sketch afterwards.</span>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={runSanityCheck}
+                  disabled={diagBusy || !arduinoStatus?.board?.port}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold border bg-teal-600 border-teal-500 text-white hover:bg-teal-500 disabled:opacity-40 transition-colors"
+                >
+                  {diagBusy ? <Loader2 size={13} className="animate-spin" /> : <Stethoscope size={13} />}
+                  Run Sanity Check
+                </button>
+                {!arduinoStatus?.board?.port && <span className="text-[10px] text-zinc-500">Plug a board into USB first.</span>}
+              </div>
+
+              {diagOutput && (
+                <pre
+                  className={`text-[10px] font-mono whitespace-pre-wrap max-h-32 overflow-y-auto p-2 rounded-lg border ${diagOk === false
+                      ? "border-red-800/50 bg-red-950/20 text-red-300"
+                      : diagOk === true
+                      ? "border-emerald-800/50 bg-emerald-950/20 text-emerald-200"
+                      : "border-[#222] bg-[#0a0a0b] text-zinc-400"
+                    }`}
+                >
+                  {diagOutput}
+                </pre>
+              )}
+              {renderDecoded(diagOutput)}
+
+              {diagFlashed && (
+                <div className="space-y-3 border-t border-[#1a1a1c] pt-3">
+                  {/* LED test */}
+                  <div className="flex items-start gap-2 text-[11px] text-amber-200 bg-amber-950/15 border border-amber-900/30 rounded-lg px-3 py-2">
+                    <Lightbulb size={14} className="mt-0.5 shrink-0 text-amber-400" />
+                    <span>
+                      <strong className="text-amber-100">LED test:</strong> your board's onboard LED should be blinking now (~1×/sec).
+                      If it is, the board is alive and the upload toolchain works — so a dead sketch was the problem, not the hardware.
+                    </span>
+                  </div>
+
+                  {/* I2C results */}
+                  <div>
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span className="text-[10px] uppercase font-mono text-zinc-500">I²C bus scan</span>
+                      {!serialConnected ? (
+                        <button
+                          onClick={connectAndRead}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-mono border bg-[#141416] border-teal-900/50 text-teal-300 hover:text-white hover:border-teal-600 transition-colors"
+                        >
+                          Connect &amp; read results
+                        </button>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-[9px] font-mono text-teal-400 uppercase tracking-wider">
+                          <span className="w-1.5 h-1.5 rounded-full bg-teal-500 animate-pulse"></span> scanning live
+                        </span>
+                      )}
+                    </div>
+
+                    {!serialConnected ? (
+                      <p className="text-[10px] text-zinc-500">Click "Connect &amp; read results" and pick the board's port to see what's on the bus.</p>
+                    ) : diagDevices.length > 0 ? (
+                      <div className="flex flex-wrap gap-1.5">
+                        {diagDevices.map((addr) => (
+                          <span key={addr} className="text-[10px] font-mono px-2 py-1 rounded bg-teal-950/30 border border-teal-800/40 text-teal-200">
+                            {addr}
+                            <span className="text-teal-400/60"> · {I2C_GUESS[addr] || "unknown device"}</span>
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-[10px] text-amber-300/80">
+                        No I²C devices found yet. If you have one connected: check SDA/SCL aren't swapped, that GND is shared, the module has power, and that pull-ups are present (most breakouts include them).
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -2293,13 +2904,25 @@ export default function App() {
                   {buildOutput}
                 </pre>
               )}
+              {renderDecoded(buildOutput)}
 
               {/* Serial monitor */}
               <div className="border-t border-[#1a1a1c] pt-3 space-y-2">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-[10px] uppercase font-mono text-zinc-500 flex items-center gap-1">
-                    <Terminal size={11} /> Serial Monitor
-                  </span>
+                  <div className="flex rounded-md overflow-hidden border border-[#2a2a2e]">
+                    <button
+                      onClick={() => setSerialView("monitor")}
+                      className={`inline-flex items-center gap-1 px-2 py-1 text-[10px] font-mono ${serialView === "monitor" ? "bg-emerald-600 text-white" : "bg-[#141416] text-zinc-400 hover:text-white"}`}
+                    >
+                      <Terminal size={11} /> Monitor
+                    </button>
+                    <button
+                      onClick={() => setSerialView("plotter")}
+                      className={`inline-flex items-center gap-1 px-2 py-1 text-[10px] font-mono ${serialView === "plotter" ? "bg-emerald-600 text-white" : "bg-[#141416] text-zinc-400 hover:text-white"}`}
+                    >
+                      <Activity size={11} /> Plotter
+                    </button>
+                  </div>
                   {!serialConnected ? (
                     <button
                       onClick={connectSerial}
@@ -2328,7 +2951,16 @@ export default function App() {
                       </option>
                     ))}
                   </select>
-                  <button onClick={() => setSerialLines("")} className="text-[10px] font-mono text-zinc-500 hover:text-white px-1.5 py-1">
+                  <button
+                    onClick={() => {
+                      setSerialLines("");
+                      plotDataRef.current = [];
+                      plotLabelsRef.current = [];
+                      lineBufRef.current = "";
+                      setPlotLegend({ labels: [], values: [] });
+                    }}
+                    className="text-[10px] font-mono text-zinc-500 hover:text-white px-1.5 py-1"
+                  >
                     Clear
                   </button>
                   <span className={`ml-auto inline-flex items-center gap-1 text-[9px] font-mono uppercase tracking-wider ${serialConnected ? "text-emerald-400" : "text-zinc-600"}`}>
@@ -2336,12 +2968,41 @@ export default function App() {
                     {serialConnected ? "live" : "idle"}
                   </span>
                 </div>
-                <pre
-                  ref={consoleRef}
-                  className="text-[10px] font-mono whitespace-pre-wrap h-40 overflow-y-auto p-2 rounded-lg border border-[#222] bg-black text-emerald-300/90"
-                >
-                  {serialLines || "[serial output appears here once you Connect]"}
-                </pre>
+                {serialView === "monitor" ? (
+                  <pre
+                    ref={consoleRef}
+                    className="text-[10px] font-mono whitespace-pre-wrap h-40 overflow-y-auto p-2 rounded-lg border border-[#222] bg-black text-emerald-300/90"
+                  >
+                    {serialLines || "[serial output appears here once you Connect]"}
+                  </pre>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button
+                        onClick={() => setPlotPaused((p) => !p)}
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-mono border bg-[#141416] border-[#2a2a2e] text-zinc-300 hover:text-white transition-colors"
+                      >
+                        {plotPaused ? "Resume" : "Pause"}
+                      </button>
+                      <div className="flex flex-wrap gap-2 items-center">
+                        {plotLegend.labels.map((lab, i) => (
+                          <span key={i} className="inline-flex items-center gap-1 text-[9px] font-mono text-zinc-400">
+                            <span className="w-2 h-2 rounded-sm" style={{ background: PLOT_COLORS[i % PLOT_COLORS.length] }}></span>
+                            {lab}
+                            {plotLegend.values[i] !== undefined ? `: ${plotLegend.values[i]}` : ""}
+                          </span>
+                        ))}
+                        {plotLegend.labels.length === 0 && (
+                          <span className="text-[9px] font-mono text-zinc-600">waiting for numeric data…</span>
+                        )}
+                      </div>
+                    </div>
+                    <canvas ref={plotCanvasRef} className="w-full h-48 rounded-lg border border-[#222] bg-black block" />
+                    <p className="text-[9px] text-zinc-600 leading-relaxed">
+                      Print numbers from your sketch, one sample per line — e.g. <span className="font-mono text-zinc-500">Serial.println(analogRead(34));</span> or several series separated by spaces/commas (optionally <span className="font-mono text-zinc-500">x:1.2 y:3.4</span>).
+                    </p>
+                  </div>
+                )}
                 <form
                   onSubmit={(e) => {
                     e.preventDefault();
@@ -2684,8 +3345,105 @@ export default function App() {
             </div>
           )}
 
+          {/* Focused-pin detail card — lives in its own fixed-height strip above
+              the board so it never covers the top pins and never shifts the
+              layout when you hover. */}
+          <div className="relative h-36 shrink-0">
+            {focusedPin ? (
+              <div className="absolute top-0 left-1/2 -translate-x-1/2 bg-[#0c0c0d] border-2 border-orange-500/30 px-4 py-3 rounded-xl shadow-xl z-20 w-80 max-h-32 overflow-y-auto text-center animate-fade-in">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[9px] font-mono font-bold text-orange-400 bg-orange-950/40 px-1.5 py-0.2 rounded uppercase">
+                    Physical PIN {focusedPin.number}
+                  </span>
+                  <span className="text-[9px] font-mono text-zinc-500">GPIO Map: {focusedPin.gpio}</span>
+                </div>
+                <h4 className="text-sm font-semibold text-white tracking-tight">{focusedPin.name}</h4>
+                <p className="text-[11px] text-zinc-400 mb-2 leading-tight">{focusedPin.primary}</p>
+                <div className="flex flex-wrap gap-1 justify-center mb-1.5">
+                  {focusedPin.features.map((feat, ix) => (
+                    <span key={ix} className="text-[8px] bg-zinc-900 border border-zinc-800 text-zinc-300 font-mono px-1 py-0.1 rounded">
+                      {feat}
+                    </span>
+                  ))}
+                </div>
+                {focusedPin.caution && (
+                  <div className="mt-2 bg-[#2d120a] border border-red-900/30 p-1.5 rounded text-left">
+                    <p className="text-[9px] text-[#e0a98f] leading-normal font-medium flex items-start gap-1">
+                      <AlertTriangle size={10} className="shrink-0 text-orange-400 mt-0.5" />
+                      <span>{focusedPin.caution}</span>
+                    </p>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="absolute inset-0 flex items-center justify-center text-[10px] font-mono text-zinc-600 uppercase tracking-widest">
+                Hover or tap a pin for details
+              </div>
+            )}
+          </div>
+
+          {/* Attached components bar (interactive snapping) */}
+          {attachedWiring.length > 0 && (
+            <div className="bg-[#0c0c0d] border border-[#0e2024] rounded-xl p-3 space-y-2 shrink-0" id="attached-components">
+              <div className="flex items-center gap-2">
+                <Cable size={12} className="text-cyan-400" />
+                <span className="text-[10px] uppercase font-mono tracking-wider text-zinc-400 font-semibold">Connected components</span>
+                <button onClick={() => setAttachedComponents([])} className="ml-auto text-[10px] font-mono text-zinc-500 hover:text-white">Clear all</button>
+              </div>
+              <div className="space-y-1.5">
+                {attachedWiring.map((aw) => (
+                  <div key={aw.comp.id} className="flex items-start gap-2 text-[10px]">
+                    <span className="w-2.5 h-2.5 rounded-sm mt-0.5 shrink-0" style={{ background: aw.color }}></span>
+                    <span className="font-semibold text-zinc-200 shrink-0">{aw.comp.name.split(" (")[0]}</span>
+                    <span className="font-mono text-zinc-400">
+                      {aw.rows.map((r) => `${r.module}→${r.board}`).join("  ·  ")}
+                    </span>
+                    {aw.issues.some((i) => i.sev !== "ok") && (
+                      <span className="text-amber-400 inline-flex items-center gap-0.5" title={aw.issues.filter((i) => i.sev !== "ok").map((i) => i.text).join(" ")}>
+                        <AlertTriangle size={11} />
+                      </span>
+                    )}
+                    <button onClick={() => detachComponent(aw.comp.id)} className="ml-auto text-zinc-600 hover:text-red-400 shrink-0" title="Remove">
+                      <X size={12} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+              {attachedWiring.some((aw) => aw.issues.some((i) => i.sev !== "ok")) && (
+                <div className="space-y-1 pt-1 border-t border-[#161616]">
+                  {attachedWiring.flatMap((aw) =>
+                    aw.issues.filter((i) => i.sev !== "ok").map((i, k) => (
+                      <p key={aw.comp.id + k} className={`text-[10px] leading-snug ${i.sev === "error" ? "text-red-400" : "text-amber-400/90"}`}>
+                        {aw.comp.name.split(" (")[0]}: {i.text}
+                      </p>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Map Layout: Visualizes the Selected Board */}
-          <div className="flex-1 flex flex-col xl:flex-row gap-8 items-center justify-center bg-[#09090a] border border-[#141416]/80 p-8 rounded-2xl relative min-h-[480px]">
+          <div
+            onDragOver={(e) => {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = "copy";
+              if (!dragOverBoard) setDragOverBoard(true);
+            }}
+            onDragLeave={() => setDragOverBoard(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              const id = e.dataTransfer.getData("text/component");
+              if (id) attachComponent(id);
+              setDragOverBoard(false);
+            }}
+            className={`flex-1 flex flex-col xl:flex-row gap-8 items-center justify-center bg-[#09090a] border rounded-2xl p-8 relative min-h-[480px] transition-colors ${dragOverBoard ? "border-cyan-500 border-2 ring-2 ring-cyan-500/30" : "border-[#141416]/80"}`}
+          >
+            {dragOverBoard && (
+              <div className="absolute inset-0 z-30 flex items-center justify-center pointer-events-none bg-cyan-950/10">
+                <span className="text-xs font-mono text-cyan-300 bg-[#0c0c0d] border border-cyan-700 rounded-full px-4 py-1.5">Drop to highlight its pins</span>
+              </div>
+            )}
 
             {/* Visual Board representation */}
             <div className="relative flex items-center justify-center py-10 scale-[0.98] transition-transform">
@@ -2951,41 +3709,6 @@ export default function App() {
                     })}
                   </div>
 
-                </div>
-              )}
-
-              {/* Floating Real-time HUD Pin-detail indicator for hovered or clicked */}
-              {focusedPin && (
-                <div className="absolute top-2 left-1/2 -translate-x-1/2 bg-[#0c0c0d] border-2 border-orange-500/30 px-4 py-3 rounded-xl shadow-xl z-20 w-80 text-center animate-fade-in">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-[9px] font-mono font-bold text-orange-400 bg-orange-950/40 px-1.5 py-0.2 rounded uppercase">
-                      Physical PIN {focusedPin.number}
-                    </span>
-                    <span className="text-[9px] font-mono text-zinc-500">
-                      GPIO Map: {focusedPin.gpio}
-                    </span>
-                  </div>
-                  <h4 className="text-sm font-semibold text-white tracking-tight">{focusedPin.name}</h4>
-                  <p className="text-[11px] text-zinc-400 mb-2 leading-tight">{focusedPin.primary}</p>
-
-                  {/* Capabilities Tags */}
-                  <div className="flex flex-wrap gap-1 justify-center mb-1.5">
-                    {focusedPin.features.map((feat, ix) => (
-                      <span key={ix} className="text-[8px] bg-zinc-900 border border-zinc-800 text-zinc-300 font-mono px-1 py-0.1 rounded">
-                        {feat}
-                      </span>
-                    ))}
-                  </div>
-
-                  {/* Warning inside the HUD */}
-                  {focusedPin.caution && (
-                    <div className="mt-2 bg-[#2d120a] border border-red-900/30 p-1.5 rounded text-left">
-                      <p className="text-[9px] text-[#e0a98f] leading-normal font-medium flex items-start gap-1">
-                        <AlertTriangle size={10} className="shrink-0 text-orange-400 mt-0.5" />
-                        <span>{focusedPin.caution}</span>
-                      </p>
-                    </div>
-                  )}
                 </div>
               )}
             </div>

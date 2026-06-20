@@ -469,6 +469,68 @@ app.post("/api/arduino/upload", async (req, res) => {
   res.json({ ok: true, success: r.success, output: r.output, sketch, fqbn, port });
 });
 
+/* ------------------------------------------------------------------ *
+ *  SANITY CHECK  —  flash a tiny diagnostic firmware that blinks the
+ *  built-in LED and scans the I2C bus, printing found addresses over
+ *  serial. Board-agnostic: Wire.begin() and LED_BUILTIN use each core's
+ *  defaults, so it works on ESP32 / AVR / ESP8266 / RP2040 without pin info.
+ * ------------------------------------------------------------------ */
+const DIAGNOSTIC_SKETCH = `#include <Wire.h>
+#ifndef LED_BUILTIN
+#define LED_BUILTIN 2
+#endif
+
+void setup() {
+  Serial.begin(115200);
+  delay(400);
+  pinMode(LED_BUILTIN, OUTPUT);
+  Wire.begin();
+  Serial.println("SANITY-CHECK READY");
+}
+
+void loop() {
+  digitalWrite(LED_BUILTIN, HIGH);   // LED on during scan
+  int n = 0;
+  Serial.println("I2C-SCAN-BEGIN");
+  for (uint8_t a = 1; a < 127; a++) {
+    Wire.beginTransmission(a);
+    if (Wire.endTransmission() == 0) {
+      Serial.print("FOUND 0x");
+      if (a < 16) Serial.print('0');
+      Serial.println(a, HEX);
+      n++;
+    }
+    delay(2);
+  }
+  Serial.print("I2C-SCAN-END ");
+  Serial.println(n);
+  digitalWrite(LED_BUILTIN, LOW);    // off between scans -> visible blink
+  delay(1200);
+}
+`;
+
+app.post("/api/arduino/diagnostic", async (req, res) => {
+  let { fqbn, port } = (req.body || {}) as { fqbn?: string; port?: string };
+  const ide = readSelectedBoardFromIde();
+  if (!fqbn) fqbn = ide?.fqbn;
+  if (!port) {
+    const cli = await getConnectedPorts();
+    port = cli.find((p) => p.detectedFqbn)?.address || cli.find((p) => p.vid)?.address || ide?.idePort || undefined;
+  }
+  if (!fqbn || !port) {
+    return res.json({ ok: false, success: false, output: "Need a board (FQBN) and a connected port — plug a board in." });
+  }
+  try {
+    const dir = path.join(os.tmpdir(), "micropin_sanity");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "micropin_sanity.ino"), DIAGNOSTIC_SKETCH);
+    const r = await runArduinoCli(["compile", "--upload", "-p", port, "--fqbn", fqbn, dir]);
+    res.json({ ok: true, success: r.success, output: r.output, fqbn, port });
+  } catch (err: any) {
+    res.json({ ok: false, success: false, output: "Failed to write/flash diagnostic: " + (err?.message || err) });
+  }
+});
+
 // Initialize Gemini Client
 const apiKey = process.env.GEMINI_API_KEY;
 let aiClient: GoogleGenAI | null = null;
