@@ -35,7 +35,8 @@ import {
   Cable,
   GitCompare,
   Stethoscope,
-  Lightbulb
+  Lightbulb,
+  ChevronDown
 } from "lucide-react";
 
 // Best-effort guesses for common I2C addresses, shown in the Sanity Check.
@@ -59,6 +60,46 @@ const I2C_GUESS: Record<string, string> = {
 };
 import { preloadedBoards } from "./data/preloadedBoards";
 import { MicrocontrollerBoard, BoardPin } from "./types";
+import gsap from "gsap";
+import { useGSAP } from "@gsap/react";
+
+gsap.registerPlugin(useGSAP);
+
+// Collapsible "sheet": a header with a chevron; the detail expands/collapses
+// with a smooth height animation when toggled.
+function Collapsible({
+  title,
+  icon,
+  defaultOpen = false,
+  children,
+}: {
+  title: string;
+  icon?: React.ReactNode;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="group flex w-full items-center justify-between gap-2 text-left"
+        aria-expanded={open}
+      >
+        <span className="flex items-center gap-1.5 text-[10px] font-mono font-semibold uppercase tracking-[0.2em] text-zinc-400 group-hover:text-zinc-200">
+          {icon}
+          {title}
+        </span>
+        <ChevronDown size={14} className={`shrink-0 text-zinc-500 transition-transform duration-300 ${open ? "rotate-180" : ""}`} />
+      </button>
+      <div className={`grid transition-[grid-template-rows] duration-300 ease-out ${open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"}`}>
+        <div className="overflow-hidden">
+          <div className="pt-3">{children}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // Maps an Arduino IDE board identifier (FQBN) to one of our high-fidelity
 // preloaded boards. Anything not listed here falls back to the dynamic
@@ -1271,7 +1312,7 @@ function decodeFlashErrors(output: string): DecodedError[] {
   return out;
 }
 
-export default function App() {
+export default function App({ onGoHome }: { onGoHome?: () => void } = {}) {
   const [selectedBoardId, setSelectedBoardId] = useState<string>("esp32-30pin");
   const [customBoard, setCustomBoard] = useState<MicrocontrollerBoard | null>(null);
 
@@ -1371,6 +1412,18 @@ export default function App() {
     setAssignments([]); // a plan is board-specific; pins differ between boards
     setAttachedComponents([]); // wiring is board-specific too
   }, [selectedBoardId]);
+
+  // Dashboard entrance animation (GSAP). No-op under reduced-motion so content
+  // is never left hidden.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useGSAP(
+    () => {
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+      gsap.from("#center-map", { opacity: 0, y: 10, duration: 0.5, ease: "power2.out" });
+      gsap.from(".dash-rail > div", { opacity: 0, y: 18, duration: 0.5, stagger: 0.07, ease: "power3.out", delay: 0.05 });
+    },
+    { scope: rootRef }
+  );
 
   // Poll the backend for the board currently plugged into USB. We chain with
   // setTimeout (not setInterval) so a slow board-scan never overlaps the next
@@ -2127,11 +2180,19 @@ export default function App() {
   };
 
   return (
-    <div className="bg-[#0a0a0b] text-[#e5e5e0] min-h-screen flex flex-col font-sans select-none antialiased">
+    <div ref={rootRef} className="bg-[#0a0a0b] text-[#e5e5e0] min-h-screen flex flex-col font-sans select-none antialiased">
       {/* Top Header */}
       <header className="flex items-center justify-between px-6 py-4 border-b border-[#1c1c1e] bg-[#0c0c0d] shadow-sm shrink-0">
         <div className="flex items-center gap-10">
-          <div className="flex items-center gap-3">
+          <div
+            className="flex items-center gap-3 cursor-pointer select-none rounded-lg transition-opacity hover:opacity-80"
+            role="button"
+            tabIndex={0}
+            onClick={() => onGoHome?.()}
+            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onGoHome?.(); } }}
+            title="Back to home"
+            aria-label="Pin-Reference — back to home"
+          >
             <div className="w-8 h-8 rounded-lg bg-orange-600 flex items-center justify-center text-white" id="app_icon">
               <CircuitBoard size={18} />
             </div>
@@ -2273,8 +2334,8 @@ export default function App() {
       {/* Main Container */}
       <main className="flex-1 flex overflow-hidden">
         {/* Sidebar Left: Chip Selection & Custom Query History */}
-        <aside className="w-64 border-r border-[#1a1a1c] bg-[#0c0c0d] flex flex-col justify-between shrink-0" id="sidebar-left">
-          <div className="flex-1 overflow-y-auto p-4 space-y-6">
+        <aside className="order-2 w-80 border-l border-[#1a1a1c] bg-[#0c0c0d] flex flex-col justify-between shrink-0" id="sidebar-left">
+          <div className="dash-rail flex-1 overflow-y-auto p-4 space-y-4">
 
             {/* Arduino IDE live sync */}
             <div className="bg-[#0e0d0b] border border-[#2a2118] rounded-xl p-3 space-y-2.5" id="arduino-sync-panel">
@@ -2340,8 +2401,7 @@ export default function App() {
             </div>
 
             {/* Quick preloads selection */}
-            <div>
-              <p className="text-[10px] uppercase tracking-[0.2em] font-mono text-zinc-500 mb-3 font-semibold">Preloaded Microcomputers</p>
+            <Collapsible title="Preloaded Microcomputers" icon={<Cpu size={13} className="text-orange-500" />} defaultOpen>
               <ul className="space-y-1">
                 {preloadedBoards.map((board) => {
                   const isActive = selectedBoardId === board.id;
@@ -2369,11 +2429,10 @@ export default function App() {
                   );
                 })}
               </ul>
-            </div>
+            </Collapsible>
 
             {/* Draggable component palette */}
-            <div id="component-palette">
-              <p className="text-[10px] uppercase tracking-[0.2em] font-mono text-zinc-500 mb-3 font-semibold">Drag a Component → Board</p>
+            <Collapsible title="Drag a Component → Board" icon={<Cable size={13} className="text-cyan-400" />}>
               <div className="flex flex-wrap gap-1.5">
                 {["servo", "hcsr04", "i2clcd", "button", "pot", "relay", "neopixel", "vl53l1x", "mpu6050", "ssd1306", "ds18b20", "nrf24l01"].map((id) => {
                   const c = SENSORS.find((s) => s.id === id);
@@ -2397,25 +2456,21 @@ export default function App() {
                 })}
               </div>
               <p className="text-[9px] text-zinc-600 mt-2 leading-relaxed">Drop one on the board to light up the exact pins it connects to.</p>
-            </div>
+            </Collapsible>
 
             {/* Custom Search list */}
-            <div>
-              <div className="flex items-center justify-between mb-3">
-                <p className="text-[10px] uppercase tracking-[0.2em] font-mono text-zinc-500 font-semibold">Custom Dynamic Catalog</p>
-                {customBoard && (
-                  <button
-                    onClick={() => {
-                      setSelectedBoardId("esp32-30pin");
-                      setCustomBoard(null);
-                    }}
-                    className="text-[10px] text-zinc-500 hover:text-white"
-                  >
-                    Reset
-                  </button>
-                )}
-              </div>
-
+            <Collapsible title="Custom Dynamic Catalog" icon={<Sparkles size={13} className="text-violet-400" />}>
+              {customBoard && (
+                <button
+                  onClick={() => {
+                    setSelectedBoardId("esp32-30pin");
+                    setCustomBoard(null);
+                  }}
+                  className="mb-2 text-[10px] text-zinc-500 hover:text-white"
+                >
+                  Reset
+                </button>
+              )}
               {customBoard ? (
                 <div
                   onClick={() => setSelectedBoardId("custom")}
@@ -2436,11 +2491,10 @@ export default function App() {
                   <p className="text-[11px] text-zinc-500 mb-1 leading-relaxed">Search to generate dynamic physical Pinout Map</p>
                 </div>
               )}
-            </div>
+            </Collapsible>
 
             {/* Demo / History list */}
-            <div className="space-y-2">
-              <p className="text-[10px] uppercase tracking-[0.2em] font-mono text-zinc-500 font-semibold">Alternative Queries</p>
+            <Collapsible title="Alternative Queries" icon={<Search size={13} className="text-amber-400" />}>
               <div className="flex flex-wrap gap-1.5">
                 {searchHistory.map((hist, k) => (
                   <button
@@ -2453,7 +2507,58 @@ export default function App() {
                   </button>
                 ))}
               </div>
-            </div>
+            </Collapsible>
+
+            {/* Default hardware buses */}
+            <Collapsible title="Default hardware buses" icon={<Layers size={13} className="text-emerald-500" />}>
+              {activeBoard.peripherals && activeBoard.peripherals.length > 0 ? (
+                <div className="space-y-1.5">
+                  {activeBoard.peripherals.map((per, index) => (
+                    <div key={index} className="bg-white/[0.02] p-2.5 border border-white/5 rounded-lg">
+                      <p className="text-[10px] font-mono font-bold text-emerald-300/80 mb-0.5">{per.interfaceType}</p>
+                      <p className="text-[10px] text-zinc-400 font-mono leading-relaxed">{per.pinsUsed}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-[10px] text-zinc-600 italic">No static communication overrides defined on this dynamic map.</p>
+              )}
+            </Collapsible>
+
+            {/* Silicon constraints */}
+            <Collapsible title="Silicon Constraints" icon={<AlertTriangle size={13} className="text-orange-500" />}>
+              <div className="space-y-3">
+                {activeBoard.warnings.map((warning, idx) => {
+                  const isInputOnly = warning.toLowerCase().includes("input-only");
+                  const isStrap = warning.toLowerCase().includes("strapping") || warning.toLowerCase().includes("boot");
+                  const isFlash = warning.toLowerCase().includes("flash") || warning.toLowerCase().includes("mem");
+                  return (
+                    <div key={idx} className="bg-[#161210] border border-orange-950/50 p-3 rounded-lg space-y-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className={`text-[8px] uppercase font-mono px-1.5 py-0.2 rounded font-bold ${isInputOnly ? "bg-amber-950 text-amber-300" :
+                            isStrap ? "bg-red-950 text-red-300" :
+                              isFlash ? "bg-zinc-800 text-zinc-200" :
+                                "bg-orange-950 text-orange-400"
+                          }`}>
+                          {isInputOnly ? "Input Limit" : isStrap ? "Boot Critical" : isFlash ? "Flash SPI" : "Careful Input"}
+                        </span>
+                      </div>
+                      <p className="text-[10px] leading-relaxed text-[#a89082] font-mono">{warning}</p>
+                    </div>
+                  );
+                })}
+              </div>
+            </Collapsible>
+
+            {/* Wiring safety guide */}
+            <Collapsible title="Wiring Safety Guide" icon={<Info size={13} className="text-sky-500" />}>
+              <ul className="text-[10px] text-zinc-400 leading-relaxed font-mono list-disc list-inside space-y-1.5">
+                <li>Check logic voltage levels before applying power</li>
+                <li>Always connect Grounds first</li>
+                <li>Don't draw more than 200mA total from all pins</li>
+                <li>Leave strapping pins floating during boot</li>
+              </ul>
+            </Collapsible>
 
             {/* API Warning Section */}
             {!isApiKeySet && (
@@ -2481,7 +2586,7 @@ export default function App() {
         </aside>
 
         {/* Central Map Workspace */}
-        <section className="flex-1 bg-[#070708] flex flex-col overflow-y-auto relative p-6 lg:p-8 space-y-6" id="center-map">
+        <section className="order-1 flex-1 bg-[#070708] flex flex-col overflow-y-auto relative p-6 lg:p-8 space-y-6" id="center-map">
 
           {searchError && (
             <div className="bg-orange-950/20 border border-orange-500/30 p-4 rounded-xl flex items-start gap-3 text-orange-200 animate-fade-in shrink-0" id="search-error-banner">
@@ -3786,81 +3891,6 @@ export default function App() {
           </div>
         </section>
 
-        {/* Right Details Panel: Critical warnings, input-only list, and default protocols */}
-        <aside className="w-80 border-l border-[#1a1a1c] bg-[#0c0c0d] p-6 space-y-6 overflow-y-auto shrink-0" id="sidebar-right">
-
-          {/* Default Protocol Maps list */}
-          <div>
-            <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-zinc-400 mb-3 flex items-center gap-2">
-              <Layers size={13} className="text-emerald-500" /> Default hardware buses
-            </h3>
-            {activeBoard.peripherals && activeBoard.peripherals.length > 0 ? (
-              <div className="space-y-1.5">
-                {activeBoard.peripherals.map((per, index) => (
-                  <div key={index} className="bg-[#141416] p-2.5 border border-zinc-800/40 rounded-lg">
-                    <p className="text-[10px] font-mono font-bold text-emerald-400 mb-0.5">{per.interfaceType}</p>
-                    <p className="text-[10px] text-zinc-300 font-mono leading-relaxed">{per.pinsUsed}</p>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-[10px] text-zinc-600 italic">No static communication overrides defined on this dynamic map.</p>
-            )}
-          </div>
-
-          {/* Pin Cautions Checklist */}
-          <div>
-            <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-orange-500 mb-3 flex items-center gap-2">
-              <AlertTriangle size={13} /> Silicon Constraints
-            </h3>
-
-            <div className="space-y-3">
-              {activeBoard.warnings.map((warning, idx) => {
-                // Check if it matches key terms to show badge flags
-                const isInputOnly = warning.toLowerCase().includes("input-only");
-                const isStrap = warning.toLowerCase().includes("strapping") || warning.toLowerCase().includes("boot");
-                const isFlash = warning.toLowerCase().includes("flash") || warning.toLowerCase().includes("mem");
-
-                return (
-                  <div
-                    key={idx}
-                    className="bg-[#161210] border border-orange-950/50 p-3 rounded-lg space-y-1"
-                  >
-                    <div className="flex items-center gap-1.5">
-                      <span className={`text-[8px] uppercase font-mono px-1.5 py-0.2 rounded font-bold ${isInputOnly ? "bg-amber-950 text-amber-300" :
-                          isStrap ? "bg-red-950 text-red-300" :
-                            isFlash ? "bg-zinc-800 text-zinc-200" :
-                              "bg-orange-950 text-orange-400"
-                        }`}>
-                        {isInputOnly ? "Input Limit" :
-                          isStrap ? "Boot Critical" :
-                            isFlash ? "Flash SPI" :
-                              "Careful Input"}
-                      </span>
-                    </div>
-                    <p className="text-[10px] leading-relaxed text-[#a89082] font-mono">
-                      {warning}
-                    </p>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Quick Checklist Guidelines */}
-          <div className="pt-2">
-            <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-zinc-500 mb-3 flex items-center gap-2">
-              <Info size={13} className="text-sky-500" /> Wiring Safety Guide
-            </h3>
-            <ul className="text-[10px] text-zinc-400 leading-relaxed font-mono list-disc list-inside space-y-1.5 bg-[#141416]/50 p-2.5 rounded-xl border border-zinc-800/40">
-              <li>Check logic voltage levels before applying power</li>
-              <li>Always connect Grounds first</li>
-              <li>Don't draw more than 200mA total from all pins</li>
-              <li>Leave strapping pins floating during boot</li>
-            </ul>
-          </div>
-
-        </aside>
       </main>
     </div>
   );

@@ -14,6 +14,82 @@ body {
   font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
+/* ===================== Landing / sign-in (Apple-glass) ===================== */
+.lp-glass {
+  background: rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(22px) saturate(160%);
+  -webkit-backdrop-filter: blur(22px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.09), 0 12px 44px -14px rgba(0, 0, 0, 0.7);
+}
+.lp-glass-hover:hover {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+.lp-dots {
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(rgba(255, 255, 255, 0.18) 1px, transparent 1.4px);
+  background-size: 22px 22px;
+  -webkit-mask-image: radial-gradient(ellipse 78% 58% at 50% 28%, #000 28%, transparent 76%);
+  mask-image: radial-gradient(ellipse 78% 58% at 50% 28%, #000 28%, transparent 76%);
+  opacity: 0.5;
+  pointer-events: none;
+}
+.lp-topglow {
+  position: absolute;
+  left: 50%;
+  top: -150px;
+  transform: translateX(-50%);
+  width: 520px;
+  max-width: 86vw;
+  height: 300px;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(255, 255, 255, 0.13), transparent 70%);
+  filter: blur(26px);
+  pointer-events: none;
+  animation: lpGlow 7s ease-in-out infinite;
+}
+@keyframes lpFadeUp {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes lpGlow {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 0.9; }
+}
+.lp-anim {
+  opacity: 0;
+  animation: lpFadeUp 0.75s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lp-anim { animation: none; opacity: 1; }
+  .lp-topglow { animation: none; }
+}
+
+/* ===================== Dashboard bento rail ===================== */
+/* Soft, low-contrast gradient cards in-theme. Every card shares the same
+   dark base (#0e0e11) so contrast between them stays gentle; only a faint
+   hue tint distinguishes each section. */
+.dash-rail > div {
+  border-radius: 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: radial-gradient(140% 120% at 0% 0%, rgba(255, 255, 255, 0.05), transparent 55%), #0e0e11;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  padding: 0.85rem;
+  transition: transform 0.25s cubic-bezier(0.22, 1, 0.36, 1), border-color 0.25s ease;
+}
+.dash-rail > div:hover {
+  transform: translateY(-2px);
+  border-color: rgba(255, 255, 255, 0.13);
+}
+.dash-rail > div:nth-child(1) { background: linear-gradient(150deg, rgba(234, 88, 12, 0.13), transparent 62%), #0e0e11; }
+.dash-rail > div:nth-child(2) { background: linear-gradient(150deg, rgba(56, 189, 248, 0.10), transparent 62%), #0e0e11; }
+.dash-rail > div:nth-child(3) { background: linear-gradient(150deg, rgba(16, 185, 129, 0.10), transparent 62%), #0e0e11; }
+.dash-rail > div:nth-child(4) { background: linear-gradient(150deg, rgba(167, 139, 250, 0.11), transparent 62%), #0e0e11; }
+.dash-rail > div:nth-child(5) { background: linear-gradient(150deg, rgba(245, 158, 11, 0.10), transparent 62%), #0e0e11; }
+.dash-rail > div:nth-child(6) { background: linear-gradient(150deg, rgba(244, 114, 182, 0.10), transparent 62%), #0e0e11; }
+
 /* Custom scrollbar styling for clean dark interface */
 ::-webkit-scrollbar {
   width: 6px;

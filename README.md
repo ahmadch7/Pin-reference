@@ -48,6 +48,9 @@ and shows its pinout automatically.
   into plain-language fixes ("hold the BOOT button and try again").
 - **Installable PWA** — runs offline. Flashing, pin reference, and serial all work with
   no internet, since they run locally through the browser and `arduino-cli`.
+- **Bento dashboard + sign-in landing** — a glass landing/front door with an animated
+  dot-field, and a dashboard where the board pinout is the hero with a collapsible
+  right rail of settings/feature "sheets" (soft, in-theme cards; GSAP entrance).
 - **Dynamic catalog** — search any other chip and a pinout is generated on demand via
   the Gemini API.
 
