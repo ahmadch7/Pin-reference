@@ -5,8 +5,8 @@ import Landing from './Landing.tsx';
 import './index.css';
 
 function Root() {
-  // Show the landing/sign-in front door once; remember the choice so it
-  // doesn't reappear on every reload. The app's features are untouched.
+  // Landing is a simple front door; it remembers you've entered so it doesn't
+  // reappear on every reload. The app's features are untouched behind it.
   const [entered, setEntered] = useState<boolean>(() => {
     try {
       return localStorage.getItem('pinref_entered') === '1';
@@ -29,6 +29,7 @@ function Root() {
       />
     );
   }
+
   return (
     <App
       onGoHome={() => {

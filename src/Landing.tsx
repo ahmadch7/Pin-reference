@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from "react";
-import { CircuitBoard, ArrowRight } from "lucide-react";
+import { useEffect, useRef } from "react";
+import { CircuitBoard, ArrowRight, ArrowUpRight } from "lucide-react";
 
 /* Animated pixel/dot field background, drawn on a canvas.
    The whole field drifts slowly on a diagonal while each dot softly pulses —
@@ -86,20 +86,7 @@ function DotField() {
   );
 }
 
-// Monochrome Google "G" to match the reference button.
-function GoogleG({ size = 17 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 48 48" fill="currentColor" aria-hidden="true">
-      <path d="M43.6 20.5H42V20H24v8h11.3c-1.6 4.7-6.1 8-11.3 8a12 12 0 1 1 0-24c3 0 5.8 1.1 7.9 3l5.7-5.7A20 20 0 1 0 24 44c11 0 20-8 20-20 0-1.3-.1-2.3-.4-3.5z" />
-      <path d="M6.3 14.7l6.6 4.8A12 12 0 0 1 24 12c3 0 5.8 1.1 7.9 3l5.7-5.7A20 20 0 0 0 6.3 14.7z" />
-      <path d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2A12 12 0 0 1 12.7 28l-6.5 5A20 20 0 0 0 24 44z" />
-      <path d="M43.6 20.5H42V20H24v8h11.3a12 12 0 0 1-4.1 5.6l6.2 5.2C39.9 35.7 44 30.4 44 24c0-1.3-.1-2.3-.4-3.5z" />
-    </svg>
-  );
-}
-
 export default function Landing({ onEnter }: { onEnter: () => void }) {
-  const [email, setEmail] = useState("");
   const d = (ms: number) => ({ animationDelay: `${ms}ms` });
 
   return (
@@ -114,24 +101,17 @@ export default function Landing({ onEnter }: { onEnter: () => void }) {
             <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-orange-600 text-white">
               <CircuitBoard size={16} />
             </span>
-            <span className="hidden sm:block text-sm font-semibold tracking-tight text-[#f5f5f0]">Pin-Reference</span>
           </div>
-          <div className="hidden items-center md:flex">
-            {["Features", "Docs", "GitHub"].map((l) => (
-              <a key={l} href="#" onClick={(e) => e.preventDefault()} className="rounded-full px-3.5 py-1.5 text-sm text-zinc-400 transition-colors hover:text-white">
-                {l}
-              </a>
-            ))}
-          </div>
-          <button onClick={onEnter} className="rounded-full border border-white/10 bg-white/5 px-4 py-1.5 text-sm text-zinc-200 transition-colors hover:bg-white/10 hover:text-white">
-            Log in
-          </button>
-          <button
-            onClick={onEnter}
-            className="rounded-full bg-white px-4 py-1.5 text-sm font-semibold text-black shadow-[0_0_22px_rgba(255,255,255,0.28)] transition-transform hover:scale-[1.03]"
+          <span className="w-6 sm:w-10" aria-hidden="true" />
+          <a
+            href="https://github.com/ahmadch7/Pin-reference"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 rounded-full border border-white/12 bg-white/5 px-4 py-1.5 text-sm font-medium text-zinc-200 transition-colors hover:bg-white/10 hover:text-white"
           >
-            Sign up
-          </button>
+            GitHub
+            <ArrowUpRight size={14} />
+          </a>
         </nav>
       </header>
 
@@ -144,53 +124,17 @@ export default function Landing({ onEnter }: { onEnter: () => void }) {
           Your microcontroller companion
         </p>
 
-        <div className="mt-10 w-full max-w-sm space-y-4">
-          <button
-            onClick={onEnter}
-            className="lp-anim lp-glass lp-glass-hover flex w-full items-center justify-center gap-2.5 rounded-2xl py-3.5 text-sm font-medium text-[#f0f0ee] transition-colors"
-            style={d(300)}
-          >
-            <span className="text-zinc-200"><GoogleG size={17} /></span>
-            Sign in with Google
-          </button>
+        <button
+          onClick={onEnter}
+          className="lp-anim group mt-10 inline-flex items-center gap-2 rounded-2xl bg-white px-7 py-3.5 text-sm font-semibold text-black shadow-[0_0_34px_rgba(255,255,255,0.22)] transition-transform hover:scale-[1.03]"
+          style={d(300)}
+        >
+          Open the Dashboard
+          <ArrowRight size={16} className="transition-transform group-hover:translate-x-0.5" />
+        </button>
 
-          <div className="lp-anim flex items-center gap-3" style={d(360)} aria-hidden="true">
-            <span className="h-px flex-1 bg-white/10" />
-            <span className="text-xs text-zinc-500">or</span>
-            <span className="h-px flex-1 bg-white/10" />
-          </div>
-
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              onEnter();
-            }}
-            className="lp-anim lp-glass lp-glass-hover flex items-center rounded-2xl py-1.5 pl-5 pr-1.5 transition-colors focus-within:border-orange-500/60"
-            style={d(420)}
-          >
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="info@gmail.com"
-              aria-label="Email address"
-              className="flex-1 bg-transparent text-sm text-white placeholder-zinc-500 focus:outline-none"
-            />
-            <button
-              type="submit"
-              aria-label="Continue"
-              className="flex h-9 w-9 items-center justify-center rounded-xl bg-white/5 text-zinc-300 transition-colors hover:bg-orange-600 hover:text-white"
-            >
-              <ArrowRight size={16} />
-            </button>
-          </form>
-        </div>
-
-        <p className="lp-anim mt-10 max-w-xs text-xs leading-relaxed text-zinc-500" style={d(520)}>
-          By continuing, you agree to the{" "}
-          <a href="#" onClick={(e) => e.preventDefault()} className="text-zinc-400 underline underline-offset-2 hover:text-white">Terms</a>,{" "}
-          <a href="#" onClick={(e) => e.preventDefault()} className="text-zinc-400 underline underline-offset-2 hover:text-white">Acceptable Use</a>, and{" "}
-          <a href="#" onClick={(e) => e.preventDefault()} className="text-zinc-400 underline underline-offset-2 hover:text-white">Privacy Notice</a>.
+        <p className="lp-anim mt-6 text-xs text-zinc-500" style={d(400)}>
+          Runs locally in your browser — no account needed.
         </p>
       </main>
     </div>

@@ -36,7 +36,10 @@ import {
   GitCompare,
   Stethoscope,
   Lightbulb,
-  ChevronDown
+  ChevronDown,
+  Share2,
+  Download,
+  HelpCircle as HelpIcon
 } from "lucide-react";
 
 // Best-effort guesses for common I2C addresses, shown in the Sanity Check.
@@ -62,6 +65,12 @@ import { preloadedBoards } from "./data/preloadedBoards";
 import { MicrocontrollerBoard, BoardPin } from "./types";
 import gsap from "gsap";
 import { useGSAP } from "@gsap/react";
+import LZString from "lz-string";
+import { Command } from "cmdk";
+import { toPng } from "html-to-image";
+import jsPDF from "jspdf";
+import { driver } from "driver.js";
+import "driver.js/dist/driver.css";
 
 gsap.registerPlugin(useGSAP);
 
@@ -1383,6 +1392,10 @@ export default function App({ onGoHome }: { onGoHome?: () => void } = {}) {
   const plotPausedRef = useRef<boolean>(false);
   const plotCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
+  // Command palette / share / export
+  const [cmdkOpen, setCmdkOpen] = useState<boolean>(false);
+  const [shareCopied, setShareCopied] = useState<boolean>(false);
+
   // Pin Planner state
   const [plannerOpen, setPlannerOpen] = useState<boolean>(false);
   const [assignments, setAssignments] = useState<PinAssignment[]>([]);
@@ -1424,6 +1437,106 @@ export default function App({ onGoHome }: { onGoHome?: () => void } = {}) {
     },
     { scope: rootRef }
   );
+
+  // ⌘K / Ctrl+K → command palette
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setCmdkOpen((o) => !o);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Restore a shared plan from the URL (?state=...) on first load.
+  useEffect(() => {
+    const s = new URLSearchParams(window.location.search).get("state");
+    if (!s) return;
+    try {
+      const obj = JSON.parse(LZString.decompressFromEncodedURIComponent(s) || "{}");
+      if (obj.b) {
+        setSelectedBoardId(obj.b);
+        setCustomBoard(null);
+      }
+      // apply after the board-change clear effect (it runs first)
+      setTimeout(() => {
+        if (Array.isArray(obj.a)) setAssignments(obj.a);
+        if (Array.isArray(obj.c)) setAttachedComponents(obj.c);
+        if (typeof obj.w === "boolean") setWifiInUse(obj.w);
+        if (Array.isArray(obj.a) && obj.a.length) setPlannerOpen(true);
+      }, 0);
+    } catch {
+      /* ignore bad state */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Build a shareable URL of the current board + plan and copy it.
+  const shareCurrentPlan = () => {
+    const obj = { b: selectedBoardId, a: assignments, c: attachedComponents, w: wifiInUse };
+    const s = LZString.compressToEncodedURIComponent(JSON.stringify(obj));
+    const url = `${window.location.origin}${window.location.pathname}?state=${s}`;
+    try {
+      window.history.replaceState(null, "", url);
+      navigator.clipboard.writeText(url);
+      setShareCopied(true);
+      setTimeout(() => setShareCopied(false), 1600);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  // Export the board view to PNG (or PDF).
+  const exportBoard = async (asPdf: boolean) => {
+    const el = document.getElementById("center-map");
+    if (!el) return;
+    try {
+      const dataUrl = await toPng(el, { backgroundColor: "#070708", pixelRatio: 2, cacheBust: true });
+      const name = `${activeBoard.name.replace(/[^\w]+/g, "_")}_pinout`;
+      if (asPdf) {
+        const w = el.scrollWidth;
+        const h = el.scrollHeight;
+        const pdf = new jsPDF({ orientation: w > h ? "landscape" : "portrait", unit: "px", format: [w, h] });
+        pdf.addImage(dataUrl, "PNG", 0, 0, w, h);
+        pdf.save(`${name}.pdf`);
+      } else {
+        const a = document.createElement("a");
+        a.href = dataUrl;
+        a.download = `${name}.png`;
+        a.click();
+      }
+    } catch {
+      /* ignore */
+    }
+  };
+
+  // Guided onboarding tour.
+  const startTour = () => {
+    const d = driver({
+      showProgress: true,
+      steps: [
+        { element: "#center-map", popover: { title: "Your board space", description: "This is your physical board. Plug a board into USB and it auto-detects the type." } },
+        { element: "#sidebar-left", popover: { title: "Settings & components", description: "Open these sheets to pick a board, drag in components, generate code, and more." } },
+        { element: "#pin-planner-toggle", popover: { title: "Plan & check wiring", description: "Use the Pin Planner to assign pins to jobs — it flags conflicts before you wire." } },
+      ],
+    });
+    d.drive();
+  };
+
+  // First run: launch the tour once.
+  useEffect(() => {
+    try {
+      if (localStorage.getItem("pinref_tour") !== "1") {
+        localStorage.setItem("pinref_tour", "1");
+        setTimeout(startTour, 700);
+      }
+    } catch {
+      /* ignore */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Poll the backend for the board currently plugged into USB. We chain with
   // setTimeout (not setInterval) so a slow board-scan never overlaps the next
@@ -2191,30 +2304,19 @@ export default function App({ onGoHome }: { onGoHome?: () => void } = {}) {
             onClick={() => onGoHome?.()}
             onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onGoHome?.(); } }}
             title="Back to home"
-            aria-label="Pin-Reference — back to home"
+            aria-label="Back to home"
           >
-            <div className="w-8 h-8 rounded-lg bg-orange-600 flex items-center justify-center text-white" id="app_icon">
-              <CircuitBoard size={18} />
+            <div className="w-9 h-9 rounded-lg bg-orange-600 flex items-center justify-center text-white shadow-[0_0_18px_rgba(234,88,12,0.35)]" id="app_icon">
+              <CircuitBoard size={19} />
             </div>
-            <div>
-              <h1 className="font-serif italic text-xl tracking-tight text-[#f5f5f0] flex items-center gap-2">
-                Pin-Reference <span className="font-sans not-italic text-xs bg-[#222] text-[#888] font-mono px-1.5 py-0.5 rounded border border-[#333]">&alpha;</span>
-              </h1>
-              <p className="text-[10px] text-zinc-500 font-mono tracking-widest uppercase">Microcontroller Companion</p>
-            </div>
-          </div>
-
-          {/* Quick Stats Banner */}
-          <div className="hidden lg:flex items-center gap-6 border-l border-[#222] pl-8">
-            <div className="flex items-center gap-2">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-              <span className="text-[11px] text-zinc-400 uppercase tracking-wider">Silicon DB Live</span>
-            </div>
+            <p className="hidden sm:block text-[10px] text-zinc-400 font-mono tracking-[0.22em] uppercase leading-tight">
+              Microcontroller<br />Companion
+            </p>
           </div>
         </div>
 
         {/* Global Realtime search */}
-        <div className="flex items-center gap-2 flex-wrap justify-end">
+        <div className="flex items-center gap-1.5 justify-end min-w-0">
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -2228,7 +2330,7 @@ export default function App({ onGoHome }: { onGoHome?: () => void } = {}) {
                 placeholder="Search chips (e.g. ESP32, Pico, STM32)..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="bg-[#141416] border border-[#222] rounded-full pl-10 pr-4 py-1.5 w-72 text-xs text-[#e5e5e0] placeholder-zinc-500 focus:outline-none focus:border-zinc-600 focus:ring-1 focus:ring-zinc-600 transition-colors"
+                className="bg-[#141416] border border-[#222] rounded-full pl-9 pr-3 py-1.5 w-44 lg:w-52 text-xs text-[#e5e5e0] placeholder-zinc-500 focus:outline-none focus:border-zinc-600 focus:ring-1 focus:ring-zinc-600 transition-colors"
                 id="header-search-bar"
               />
               <Search className="absolute left-3.5 top-2.5 text-zinc-500" size={13} />
@@ -2324,10 +2426,20 @@ export default function App({ onGoHome }: { onGoHome?: () => void } = {}) {
             <span>Flash &amp; Monitor</span>
           </button>
 
-          {/* Settings Indicator / Info indicator */}
-          <div className="text-[10px] uppercase font-mono tracking-widest text-[#888888]">
-            <span className="text-[#e5e5e0] font-bold border-b border-orange-500 pb-1">Microcontroller Map</span>
-          </div>
+          {/* Share / Export / Tour / Command palette (compact) */}
+          <span className="mx-0.5 h-5 w-px bg-white/10" aria-hidden="true" />
+          <button onClick={shareCurrentPlan} title="Copy a shareable link of this board + plan" className="inline-flex items-center justify-center h-8 w-8 rounded-full border bg-[#141416] border-[#2a2a2e] text-zinc-300 hover:text-white hover:border-zinc-600 transition-all">
+            {shareCopied ? <CheckCircle2 size={14} className="text-emerald-400" /> : <Share2 size={14} />}
+          </button>
+          <button onClick={() => exportBoard(false)} title="Export the board view as a PNG" className="inline-flex items-center justify-center h-8 w-8 rounded-full border bg-[#141416] border-[#2a2a2e] text-zinc-300 hover:text-white hover:border-zinc-600 transition-all">
+            <Download size={14} />
+          </button>
+          <button onClick={startTour} title="Replay the guided tour" className="inline-flex items-center justify-center h-8 w-8 rounded-full border bg-[#141416] border-[#2a2a2e] text-zinc-300 hover:text-white hover:border-zinc-600 transition-all">
+            <HelpIcon size={14} />
+          </button>
+          <button onClick={() => setCmdkOpen(true)} title="Command palette (Ctrl / ⌘ K)" className="inline-flex items-center h-8 px-2.5 rounded-full text-[10px] font-mono font-semibold border bg-[#141416] border-[#2a2a2e] text-zinc-400 hover:text-white hover:border-zinc-600 transition-all">
+            ⌘K
+          </button>
         </div>
       </header>
 
@@ -3892,6 +4004,45 @@ export default function App({ onGoHome }: { onGoHome?: () => void } = {}) {
         </section>
 
       </main>
+
+      {/* Command palette (⌘K) */}
+      <Command.Dialog open={cmdkOpen} onOpenChange={setCmdkOpen} label="Command menu" className="cmdk-root">
+        <Command.Input placeholder="Search boards, features, pins…" />
+        <Command.List>
+          <Command.Empty>No results found.</Command.Empty>
+          <Command.Group heading="Boards">
+            {preloadedBoards.map((b) => (
+              <Command.Item key={b.id} value={`board ${b.name}`} onSelect={() => { setSelectedBoardId(b.id); setCustomBoard(null); setCmdkOpen(false); }}>
+                <Cpu size={14} /> {b.name}
+              </Command.Item>
+            ))}
+          </Command.Group>
+          <Command.Group heading="Open">
+            <Command.Item value="pin planner" onSelect={() => { setPlannerOpen(true); setCmdkOpen(false); }}><SlidersHorizontal size={14} /> Pin Planner</Command.Item>
+            <Command.Item value="code generator" onSelect={() => { setCodeGenOpen(true); setCmdkOpen(false); }}><Code2 size={14} /> Code Gen</Command.Item>
+            <Command.Item value="wiring helper" onSelect={() => { setWiringOpen(true); setCmdkOpen(false); }}><Cable size={14} /> Wiring Helper</Command.Item>
+            <Command.Item value="compare boards" onSelect={() => { setCompareOpen(true); setCmdkOpen(false); }}><GitCompare size={14} /> Compare Boards</Command.Item>
+            <Command.Item value="flash monitor" onSelect={() => { setFlashOpen(true); setCmdkOpen(false); }}><Terminal size={14} /> Flash &amp; Monitor</Command.Item>
+            <Command.Item value="serial plotter graph" onSelect={() => { setFlashOpen(true); setSerialView("plotter"); setCmdkOpen(false); }}><Activity size={14} /> Serial Plotter</Command.Item>
+            <Command.Item value="sanity check diagnostics" onSelect={() => { setDiagOpen(true); setCmdkOpen(false); }}><Stethoscope size={14} /> Sanity Check</Command.Item>
+          </Command.Group>
+          <Command.Group heading="Actions">
+            <Command.Item value="share link" onSelect={() => { shareCurrentPlan(); setCmdkOpen(false); }}><Share2 size={14} /> Copy share link</Command.Item>
+            <Command.Item value="export png image" onSelect={() => { setCmdkOpen(false); exportBoard(false); }}><Download size={14} /> Export PNG</Command.Item>
+            <Command.Item value="export pdf" onSelect={() => { setCmdkOpen(false); exportBoard(true); }}><Download size={14} /> Export PDF</Command.Item>
+            <Command.Item value="clear board plan components" onSelect={() => { setAssignments([]); setAttachedComponents([]); setCmdkOpen(false); }}><Trash2 size={14} /> Clear plan &amp; components</Command.Item>
+            <Command.Item value="start tour help" onSelect={() => { setCmdkOpen(false); startTour(); }}><HelpIcon size={14} /> Start tour</Command.Item>
+          </Command.Group>
+          <Command.Group heading="Pins">
+            {activeBoard.pins.map((p) => (
+              <Command.Item key={p.number} value={`pin ${p.name} ${p.gpio} ${p.primary}`} onSelect={() => { setSelectedPinName(p.name); setSelectedBoardId(selectedBoardId); setCmdkOpen(false); }}>
+                <span className="font-mono">{p.name}</span>
+                <span className="text-zinc-500">· {p.primary}</span>
+              </Command.Item>
+            ))}
+          </Command.Group>
+        </Command.List>
+      </Command.Dialog>
     </div>
   );
 }
